@@ -1,0 +1,10 @@
+{
+  "name": "claudebot",
+  "version": "0.1.0",
+  "description": "Discord bot brain plugin - processes piped Discord messages with intelligent triage, tool-based actions, evolving personality, and persistent memory",
+  "author": {
+    "name": "James Prial"
+  },
+  "license": "MIT",
+  "keywords": ["discord", "bot", "chat", "memory", "personality"]
+}
