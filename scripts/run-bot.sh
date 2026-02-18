@@ -6,6 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Load .env if present
+if [[ -f "${PLUGIN_DIR}/.env" ]]; then
+  set -a
+  source "${PLUGIN_DIR}/.env"
+  set +a
+fi
+
 CLAUDEBOT_MCP_SOURCE="${CLAUDEBOT_MCP_SOURCE:-$HOME/code/claudebot-mcp}"
 CLAUDEBOT_MCP_URL="${CLAUDEBOT_MCP_URL:-http://localhost:8080}"
 CLAUDEBOT_MCP_PORT="${CLAUDEBOT_MCP_PORT:-8080}"
