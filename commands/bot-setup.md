@@ -1,12 +1,14 @@
 ---
-description: Configure the Discord bot - set up channels, personality, and initialize memory files
-argument-hint: [reset-personality | show-personality | show-config]
+description: Configure the Discord bot - set up channels, personality, initialize memory files, and verify MCP connectivity
+argument-hint: [reset-personality | show-personality | show-config | show-status]
 allowed-tools:
   - Read
   - Write
   - Edit
   - Bash(mkdir:*)
   - AskUserQuestion
+  - mcp__plugin_claudebot_discord__discord_get_guild
+  - mcp__plugin_claudebot_discord__discord_get_channels
 ---
 
 # Bot Setup
@@ -28,19 +30,25 @@ Based on the argument provided (or lack thereof), perform the appropriate action
 
 Run the interactive setup:
 
-1. **Create memory directory**: If `.claude/memory/` doesn't exist, create it and copy all template files from the plugin's `templates/memory/` directory.
+1. **Verify MCP connectivity**: Call `discord_get_guild` to confirm the MCP server is running and accessible. If it fails, warn the user that the MCP server needs to be running for full functionality, but continue with manual setup.
 
-2. **Configure channels**: Ask the user which Discord channels the bot will operate in. For each channel, ask:
+2. **Discover channels**: If MCP is available, call `discord_get_channels` to get the list of available Discord channels. Present these to the user for selection instead of requiring manual entry.
+
+3. **Create memory directory**: If `.claude/memory/` doesn't exist, create it and copy all template files from the plugin's `templates/memory/` directory.
+
+4. **Configure channels**: Ask the user which Discord channels the bot will operate in (pre-populated from discovery if available). For each channel, ask:
    - What tools should be available? (Options: WebSearch, Read, Bash, Glob, Grep, Write, Edit)
    - What response threshold? (low/medium/high)
 
-3. **Set bot name**: Ask the user for a bot name (default: "claudebot")
+5. **Set bot name**: Ask the user for a bot name (default: "claudebot")
 
-4. **Personality seed**: Ask if they want to provide an initial personality seed, or start completely blank for organic growth.
+6. **Personality seed**: Ask if they want to provide an initial personality seed, or start completely blank for organic growth.
 
-5. **Write settings**: Create `.claude/claudebot.local.md` with YAML frontmatter containing the channel configurations and any personality seed.
+7. **MCP configuration**: Ask for the MCP server URL (default: `http://localhost:8080`)
 
-6. **Confirm**: Show a summary of the configuration.
+8. **Write settings**: Create `.claude/claudebot.local.md` with YAML frontmatter containing the MCP config, channel configurations, and any personality seed.
+
+9. **Confirm**: Show a summary of the configuration including MCP connectivity status and discovered channels.
 
 ### `reset-personality` argument
 
@@ -60,13 +68,25 @@ Run the interactive setup:
 
 1. Read `.claude/claudebot.local.md`
 2. Display the current configuration:
+   - MCP URL
    - Configured channels with their tools and thresholds
    - Bot name
    - Personality seed (if any)
    - Additional instructions (if any)
+
+### `show-status` argument
+
+1. Call `discord_get_guild` to check MCP server connectivity
+2. If successful, display:
+   - Guild name and member count
+   - MCP server URL (from config)
+   - Available channels (call `discord_get_channels`)
+   - Configured channels vs available channels comparison
+3. If MCP is unreachable, report the connection error and suggest checking that the MCP server is running
 
 ## Tips
 
 - If settings file already exists, ask if the user wants to update or replace it
 - If memory files already exist, don't overwrite them (they contain accumulated bot memory)
 - Always confirm destructive actions (reset-personality, replacing existing config)
+- Channel discovery via MCP is preferred over manual entry — it prevents typos and shows category info

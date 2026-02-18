@@ -22,7 +22,10 @@ description: Use this agent when context compaction is about to occur (PreCompac
 
 model: opus
 color: magenta
-tools: ["Read", "Write", "Edit"]
+tools:
+  - Read
+  - Write
+  - Edit
 ---
 
 You are the memory manager for a Discord bot. Your job is to preserve important conversation context by updating persistent memory files before context compaction occurs.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The triage agent evaluates every incoming Discord message and makes one of three decisions: **ignore**, **respond**, or **act**. This framework defines the logic behind each decision.
+The triage agent evaluates every incoming Discord message and makes one of four decisions: **ignore**, **react**, **respond**, or **act**. This framework defines the logic behind each decision.
 
 ## Response Thresholds
 
@@ -36,6 +36,31 @@ Choose **ignore** when:
 → IGNORE: Reaction, no content to engage with
 ```
 
+## Decision: React
+
+Choose **react** when:
+- The message is funny or notable but doesn't warrant a full reply
+- Simple agreement or acknowledgment is more natural than a message
+- The bot wants to show it's "listening" without dominating the conversation
+- Someone shared good news or an accomplishment (celebrate with an emoji)
+- The message is a joke that lands — a 😂 is better than explaining why it's funny
+
+React is a lightweight engagement option — use it to stay present in the conversation without being verbose.
+
+**Typing indicator:** Not needed for reactions (they're instant).
+
+**Examples:**
+```
+[#general] @alice: just shipped the new feature! 🚀
+→ REACT: 🎉 (celebrate without a full message)
+
+[#random] @bob: *posts a great meme*
+→ REACT: 😂 (acknowledge humor naturally)
+
+[#dev] @charlie: finally fixed that memory leak after 3 days
+→ REACT: 💪 (simple acknowledgment)
+```
+
 ## Decision: Respond
 
 Choose **respond** when:
@@ -46,10 +71,14 @@ Choose **respond** when:
 - Someone seems stuck or confused and the bot can help
 - The conversation has a natural opening for the bot to join
 
+**Typing indicator:** Call `discord_typing` immediately after deciding to respond. This shows users the bot is working on a reply.
+
+**Channel history:** If the message is ambiguous or references earlier conversation, fetch the last 10-20 messages via `discord_get_messages` for context before responding.
+
 **Examples:**
 ```
 [#general] @alice: hey @claudebot what do you think about TypeScript?
-→ RESPOND: Directly addressed
+→ RESPOND: Directly addressed (send typing → craft reply → send via discord_send_message)
 
 [#dev] @bob: does anyone know how to fix a memory leak in Node?
 → RESPOND: Question the bot can help with (if threshold >= medium)
@@ -66,6 +95,8 @@ Choose **act** when:
 - The request requires tools beyond just generating text
 - The bot needs external information to give a useful response
 
+**Typing indicator:** Call `discord_typing` immediately — research and execution take time and users should see the bot is working.
+
 **Sub-routing for act:**
 - **researcher** - When the action involves gathering information (web search, reading docs, checking files)
 - **executor** - When the action involves doing something (running commands, modifying files, executing scripts)
@@ -75,10 +106,10 @@ Choose **act** when:
 **Examples:**
 ```
 [#dev] @alice: @claudebot can you look up the latest React 19 changes?
-→ ACT (researcher): Needs web search
+→ ACT (researcher): Needs web search (send typing immediately)
 
 [#dev] @bob: @claudebot run the tests for the auth module
-→ ACT (executor): Needs Bash tool - check channel allows Bash first
+→ ACT (executor): Needs Bash tool - check channel allows Bash first (send typing immediately)
 
 [#general] @charlie: @claudebot what's the weather like?
 → ACT (researcher): Needs web search (if channel allows WebSearch)
@@ -102,12 +133,14 @@ When multiple messages arrive quickly from the same conversation:
 - Triage each individually but consider the thread context
 - Avoid responding to every message in a rapid exchange
 - Wait for a natural pause or direct address
+- Use `discord_get_messages` to see the full rapid sequence before deciding
 
 ### Ambiguous Mentions
 When it's unclear if the bot is being addressed:
 - At `low` threshold: ignore
 - At `medium` threshold: ignore unless the message is clearly a question
 - At `high` threshold: respond if the bot can contribute
+- Fetch channel history if needed to understand whether the bot is part of the conversation
 
 ### Conflicting Signals
 When a message could be ignore OR respond:

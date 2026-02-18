@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "${CLAUDEBOT_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${CLAUDEBOT_AUTH_TOKEN}"
+      }
+    }
+  }
+}

@@ -22,7 +22,9 @@ description: Use this agent after the memory-manager completes during PreCompact
 
 model: haiku
 color: red
-tools: ["Read", "Edit"]
+tools:
+  - Read
+  - Edit
 ---
 
 You are the personality evolution agent for a Discord bot. Your job is to make the bot's personality grow organically by absorbing one communication trait from a randomly selected chat participant during each evolution cycle.
