@@ -44,11 +44,9 @@ Run the interactive setup:
 
 6. **Personality seed**: Ask if they want to provide an initial personality seed, or start completely blank for organic growth.
 
-7. **MCP configuration**: Ask for the MCP server URL (default: `http://localhost:8080`)
+7. **Write settings**: Create `.claude/claudebot.local.md` with YAML frontmatter containing the channel configurations and any personality seed.
 
-8. **Write settings**: Create `.claude/claudebot.local.md` with YAML frontmatter containing the MCP config, channel configurations, and any personality seed.
-
-9. **Confirm**: Show a summary of the configuration including MCP connectivity status and discovered channels.
+8. **Confirm**: Show a summary of the configuration including discovered channels.
 
 ### `reset-personality` argument
 
@@ -68,7 +66,6 @@ Run the interactive setup:
 
 1. Read `.claude/claudebot.local.md`
 2. Display the current configuration:
-   - MCP URL
    - Configured channels with their tools and thresholds
    - Bot name
    - Personality seed (if any)
@@ -79,7 +76,6 @@ Run the interactive setup:
 1. Call `discord_get_guild` to check MCP server connectivity
 2. If successful, display:
    - Guild name and member count
-   - MCP server URL (from config)
    - Available channels (call `discord_get_channels`)
    - Configured channels vs available channels comparison
 3. If MCP is unreachable, report the connection error and suggest checking that the MCP server is running

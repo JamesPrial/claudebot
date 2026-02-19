@@ -9,17 +9,15 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 ## Running the Bot
 
 ```bash
-# Full lifecycle (builds MCP server, starts Claude Code session, polls Discord)
+# Full lifecycle (starts Claude Code session with Docker MCP server, polls Discord)
 ./scripts/run-bot.sh
-
-# Build/start just the MCP server (for development)
-./scripts/start-mcp.sh
-./scripts/start-mcp.sh --build-only
 ```
+
+**Prerequisites:** Docker installed and running.
 
 Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`. See `.env.example` for all options.
 
-The MCP server (`claudebot-mcp`) is a **separate Go project** at `~/code/claudebot-mcp` (configurable via `CLAUDEBOT_MCP_SOURCE`). It must be built and running for Discord I/O.
+The MCP server (`claudebot-mcp`) runs as a Docker container pulled from `ghcr.io/jamesprial/claudebot-mcp:latest`. Claude Code manages its lifecycle automatically via `.mcp.json` (stdio transport).
 
 ## Setup & Config
 
@@ -34,7 +32,7 @@ Per-project settings live in `.claude/claudebot.local.md` (YAML frontmatter for 
 ## Architecture
 
 Messages flow through a pipeline:
-1. **Runner** (`scripts/run-bot.sh`) polls MCP server for Discord messages, pipes each as JSON into a headless Claude Code session via FIFO
+1. **Runner** (`scripts/run-bot.sh`) sends periodic poll prompts to a headless Claude Code session via FIFO; Claude Code polls Discord via MCP tools
 2. **Triage agent** (haiku) evaluates every message: ignore, react, respond, or act — sends typing indicator when engaging
 3. **Downstream agent** handles the routed action:
    - `responder` (sonnet) — personality-driven replies
@@ -53,7 +51,7 @@ All agents send responses **directly to Discord via MCP tools** — they don't r
 | Agents | `agents/*.md` | triage, responder, researcher, executor, memory-manager, personality-evolver |
 | Hook | `hooks/hooks.json` | PreCompact prompt-based hook for memory preservation |
 | Command | `commands/bot-setup.md` | `/bot-setup` configuration wizard |
-| MCP config | `.mcp.json` | HTTP connection to claudebot-mcp server |
+| MCP config | `.mcp.json` | Docker stdio connection to claudebot-mcp |
 | Settings template | `templates/claudebot.local.md` | Per-project config template |
 | Memory templates | `templates/memory/*.md` | Initial blank memory files |
 | Reference docs | `skills/discord-bot/references/` | Memory schema and decision framework |
@@ -68,7 +66,7 @@ Memory files live in `.claude/memory/` in the project being botted (not this plu
 
 ## MCP Tools
 
-All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_send_message` (with `reply_to` for threading), `discord_get_messages`, `discord_typing`, `discord_add_reaction`, `discord_edit_message`, `discord_get_channels`, `discord_get_guild`.
+All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_poll_messages` (primary message intake), `discord_send_message` (with `reply_to` for threading), `discord_get_messages`, `discord_typing`, `discord_add_reaction`, `discord_edit_message`, `discord_get_channels`, `discord_get_guild`.
 
 ## Conventions
 

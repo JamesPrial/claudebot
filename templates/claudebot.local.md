@@ -1,6 +1,4 @@
 ---
-mcp:
-  url: "http://localhost:8080"
 channels:
   general:
     tools: [WebSearch]

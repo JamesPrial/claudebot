@@ -7,7 +7,7 @@ description: This skill should be used when the session is operating as a Discor
 
 ## Purpose
 
-Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. A runner script polls for incoming Discord messages and pipes them as JSON user prompts. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, and reading channel history.
+Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. The MCP server runs as a Docker container via stdio transport. A runner script sends periodic poll prompts, and you call `discord_poll_messages` to receive incoming messages. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, and reading channel history.
 
 ## Session Initialization
 
@@ -22,9 +22,11 @@ At session start:
 If memory files don't exist, run `/claudebot:bot-setup` to initialize them.
 If MCP tools are unavailable, log the issue — the bot can still process messages but cannot send responses directly.
 
-## Message Input Format
+## Message Polling
 
-Messages arrive as JSON objects from the runner script:
+When you receive a poll prompt from the runner, call `discord_poll_messages` with `timeout_seconds` and `limit` parameters. This returns an array of message objects (or "No new messages" if the queue is empty).
+
+Each message object:
 
 ```json
 {
@@ -49,7 +51,7 @@ Key fields for downstream agents:
 
 Every incoming Discord message follows this pipeline:
 
-1. **Receive** - Message arrives as a JSON user prompt from the runner
+1. **Receive** - Call `discord_poll_messages` to get new messages from the queue
 2. **Triage** - Dispatch the `triage` agent (haiku) with the message JSON, channel config, and current personality context
 3. **Route** based on triage decision:
    - **ignore** - Take no action, wait for next message
@@ -61,6 +63,13 @@ Every incoming Discord message follows this pipeline:
 ## MCP Capabilities
 
 Agents interact with Discord through MCP tools. All tool names are prefixed with `mcp__plugin_claudebot_discord__`.
+
+### Polling for Messages
+Call `discord_poll_messages` with:
+- `timeout_seconds` — How long to wait for new messages (default: 30)
+- `limit` — Maximum number of messages to return (default: 10)
+
+Returns an array of message objects or "No new messages". This is the primary message intake mechanism — the runner sends poll prompts periodically, and you call this tool to check for new Discord messages.
 
 ### Sending Messages
 Call `discord_send_message` with:

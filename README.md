@@ -6,10 +6,9 @@ A Claude Code plugin that turns a Claude Code session into a Discord bot brain w
 
 A runner script (`scripts/run-bot.sh`) orchestrates the full bot lifecycle:
 
-1. Builds and starts the [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Go server for Discord connectivity
-2. Launches a headless Claude Code session with this plugin loaded
-3. Polls the MCP server for incoming Discord messages via long-polling
-4. Pipes each message as a JSON user prompt into Claude via a FIFO
+1. Launches a headless Claude Code session with this plugin loaded (the [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Docker container starts automatically via `.mcp.json`)
+2. Sends periodic poll prompts to Claude Code via a FIFO
+3. Claude Code polls Discord for messages via MCP tools and processes them
 
 From there, agents take over — triaging each message, crafting personality-driven replies, running web searches, executing commands, and sending everything directly back to Discord via MCP tools.
 
@@ -26,7 +25,7 @@ From there, agents take over — triaging each message, crafting personality-dri
 ### Prerequisites
 
 - [Claude Code](https://claude.ai/code) CLI installed
-- [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Go server cloned and buildable (default location: `~/code/claudebot-mcp`)
+- [Docker](https://docs.docker.com/get-docker/) installed and running
 - A Discord bot token with message content intent enabled
 
 ### Install
@@ -58,10 +57,7 @@ From there, agents take over — triaging each message, crafting personality-dri
 |----------|----------|---------|-------------|
 | `CLAUDEBOT_DISCORD_TOKEN` | Yes | — | Discord bot token (prefix with `Bot `) |
 | `CLAUDEBOT_DISCORD_GUILD_ID` | Yes | — | Discord server ID |
-| `CLAUDEBOT_AUTH_TOKEN` | No | — | Bearer token for MCP server auth |
-| `CLAUDEBOT_MCP_URL` | No | `http://localhost:8080` | MCP server URL |
-| `CLAUDEBOT_MCP_SOURCE` | No | `~/code/claudebot-mcp` | Path to claudebot-mcp Go source |
-| `CLAUDEBOT_POLL_TIMEOUT` | No | `30` | Long-poll timeout in seconds |
+| `CLAUDEBOT_POLL_TIMEOUT` | No | `30` | Poll interval in seconds |
 
 ## Configuration
 
@@ -101,7 +97,7 @@ default_channel:
 ### Message Pipeline
 
 ```
-Discord → MCP Server → Runner (poll) → FIFO → Claude Code Session
+Discord → MCP Server (Docker) ←stdio→ Claude Code Session ← FIFO ← Runner (poll prompts)
                                                     ↓
                                               Triage Agent (haiku)
                                              ↙    ↙     ↘      ↘

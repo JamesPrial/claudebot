@@ -1,11 +1,16 @@
 {
   "mcpServers": {
     "discord": {
-      "type": "http",
-      "url": "${CLAUDEBOT_MCP_URL}",
-      "headers": {
-        "Authorization": "Bearer ${CLAUDEBOT_AUTH_TOKEN}"
-      }
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "--pull", "always",
+        "-e", "CLAUDEBOT_DISCORD_TOKEN",
+        "-e", "CLAUDEBOT_DISCORD_GUILD_ID",
+        "ghcr.io/jamesprial/claudebot-mcp:latest",
+        "--stdio"
+      ]
     }
   }
 }
