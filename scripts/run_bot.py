@@ -203,13 +203,16 @@ def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
         ["docker", "rm", "-f", container_name],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    config_file = PLUGIN_DIR / "configs" / "mcp-daemon.yaml"
     subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,
         ] + platform_flags + [
             "-p", f"{mcp_port}:8080",
+            "-v", f"{config_file}:/etc/claudebot/config.yaml:ro",
             "-e", "CLAUDEBOT_DISCORD_TOKEN",
             "-e", "CLAUDEBOT_DISCORD_GUILD_ID",
+            "-e", "CLAUDEBOT_CONFIG_PATH=/etc/claudebot/config.yaml",
             "ghcr.io/jamesprial/claudebot-mcp:latest",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -246,7 +249,7 @@ def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
             capture_output=True, text=True,
         )
         combined = result.stdout + result.stderr
-        if "discord: connected as" in combined:
+        if "discord connected" in combined:
             log.info("MCP daemon connected to Discord")
             break
 
