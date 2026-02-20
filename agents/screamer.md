@@ -75,14 +75,28 @@ Save the returned message ID for later editing.
 
 ### Step 4: Build and run the Docker command
 ```bash
-docker run --rm --network host --platform linux/arm64 \
+SCREAM_OUTPUT="$(docker run --rm --network host --platform linux/arm64 \
   -e DISCORD_TOKEN="$CLAUDEBOT_DISCORD_TOKEN" \
   ghcr.io/jamesprial/go-scream:latest \
   play [--preset <preset>] [--duration <duration>] [--volume <volume>] \
-  "$CLAUDEBOT_DISCORD_GUILD_ID" <channel_id>
+  "$CLAUDEBOT_DISCORD_GUILD_ID" <channel_id> 2>&1)"
+SCREAM_EXIT=$?
+
+# Log the scream output (skip if plugin dir unavailable)
+if [[ -n "${CLAUDEBOT_PLUGIN_DIR:-}" && -d "${CLAUDEBOT_PLUGIN_DIR}/logs" ]]; then
+  SCREAM_LOG="${CLAUDEBOT_PLUGIN_DIR}/logs/scream-$(date '+%Y%m%d').log"
+  {
+    printf '[scream] %s channel=%s preset=%s exit=%d\n' \
+      "$(date '+%H:%M:%S')" "<channel_id>" "<preset>" "$SCREAM_EXIT"
+    echo "$SCREAM_OUTPUT"
+  } >> "$SCREAM_LOG"
+fi
 ```
 
 Key details:
+- Capture all Docker output into `$SCREAM_OUTPUT` and exit code into `$SCREAM_EXIT` so results can be logged and inspected
+- The log block is guarded — if `CLAUDEBOT_PLUGIN_DIR` is unset or `logs/` doesn't exist, logging is silently skipped (never fail the scream over logging)
+- Replace `<channel_id>` and `<preset>` placeholders with actual values in both the docker command and the printf
 - `DISCORD_TOKEN` inside the container uses `CLAUDEBOT_DISCORD_TOKEN` from the host environment
 - `--network host` is required for Discord voice (UDP hole-punching)
 - Guild ID comes from `CLAUDEBOT_DISCORD_GUILD_ID` env var
@@ -91,8 +105,9 @@ Key details:
 - If no preset specified, omit the flag entirely (go-scream will randomize)
 
 ### Step 5: Handle result
-- **Success**: Edit the status message to "Screamed in **[channel name]**!" and react with 😱 to the original message
-- **Failure**: Edit the status message to include the error. Common errors:
+Check `$SCREAM_EXIT` and `$SCREAM_OUTPUT` from Step 4:
+- **Success** (`$SCREAM_EXIT` = 0): Edit the status message to "Screamed in **[channel name]**!" and react with 😱 to the original message
+- **Failure** (`$SCREAM_EXIT` != 0): Edit the status message to include the error from `$SCREAM_OUTPUT`. Common errors:
   - Docker not available: "Docker is not available — cannot play scream"
   - Voice join failed: "Could not join voice channel — is the bot authorized for voice?"
   - Container pull failed: "Could not pull go-scream image"

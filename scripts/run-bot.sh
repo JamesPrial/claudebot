@@ -21,7 +21,10 @@ MCP_PORT="${CLAUDEBOT_MCP_PORT:-8080}"
 MCP_CONTAINER="claudebot-mcp-daemon"
 LOG_DIR="${PLUGIN_DIR}/logs"
 LOG_FILE="${LOG_DIR}/bot-$(date '+%Y%m%d').log"
+MCP_LOG_FILE="${LOG_DIR}/mcp-$(date '+%Y%m%d').log"
 SESSION_FILE="${PLUGIN_DIR}/.bot-session-id"
+MCP_LOG_PID=""
+export CLAUDEBOT_PLUGIN_DIR="$PLUGIN_DIR"
 
 log() { echo "[run-bot] $(date '+%H:%M:%S') $*" | tee -a "$LOG_FILE" >&2; }
 
@@ -33,6 +36,12 @@ cleanup() {
   SHUTTING_DOWN=true
 
   log "Shutting down — killing child processes..."
+
+  # Kill MCP log streamer first to avoid broken-pipe noise
+  if [[ -n "$MCP_LOG_PID" ]]; then
+    kill "$MCP_LOG_PID" 2>/dev/null || true
+  fi
+
   # Kill all processes in this process group (claude, docker, sleep)
   kill -- -$$ 2>/dev/null || true
   # Wait briefly for children to exit
@@ -119,6 +128,12 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# --- Start MCP daemon log stream ---
+log "Starting MCP daemon log stream..."
+docker logs -f --timestamps "$MCP_CONTAINER" >> "$MCP_LOG_FILE" 2>&1 &
+MCP_LOG_PID=$!
+log "MCP log streamer PID: ${MCP_LOG_PID}"
+
 # --- Generate runtime .mcp.json ---
 RUNTIME_MCP_CONFIG="${PLUGIN_DIR}/.mcp.runtime.json"
 cat > "$RUNTIME_MCP_CONFIG" <<EOF
@@ -191,6 +206,13 @@ while true; do
   if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
     log "ERROR: MCP daemon container died, exiting"
     exit 1
+  fi
+
+  # Check that MCP log streamer is still running
+  if [[ -n "$MCP_LOG_PID" ]] && ! kill -0 "$MCP_LOG_PID" 2>/dev/null; then
+    log "WARNING: MCP log streamer died, restarting..."
+    docker logs -f --timestamps "$MCP_CONTAINER" >> "$MCP_LOG_FILE" 2>&1 &
+    MCP_LOG_PID=$!
   fi
 
   POLL_PROMPT="Poll for new Discord messages using discord_poll_messages \
