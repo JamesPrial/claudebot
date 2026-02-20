@@ -10,3 +10,4 @@ logs/
 .bot-session-*.id
 .claudebot-*.pid
 .worktrees/
+instances/

@@ -1,219 +1,298 @@
 #!/usr/bin/env python3
-"""CLI for managing claudebot systemd instances."""
+"""CLI for managing claudebot instances as background processes.
+
+Pure userland — no systemd, no root. Uses PID files and signals to
+manage run_bot.py processes that are already well-behaved daemons.
+"""
 
 import argparse
+import errno
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
-
-UNIT_NAME = "claudebot@"
-UNIT_FILE = "claudebot@.service"
-SYSTEMD_DIR = Path("/etc/systemd/system")
-CONFIG_DIR = Path("/etc/claudebot")
-LOG_DIR = Path("/var/log/claudebot")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_DIR = SCRIPT_DIR.parent
-SOURCE_UNIT = PLUGIN_DIR / "systemd" / UNIT_FILE
 EXAMPLE_ENV = PLUGIN_DIR / "configs" / "example.env"
+INSTANCES_DIR = PLUGIN_DIR / "instances"
 
 
-def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def is_process_alive(pid: int) -> bool:
+    """Check if a process exists (without sending a real signal)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as e:
+        return e.errno == errno.EPERM  # alive but not ours
 
 
-def require_root(action: str) -> None:
-    if os.geteuid() != 0:
-        print(f"Error: '{action}' requires root. Run with sudo.", file=sys.stderr)
-        sys.exit(1)
-
-
-def find_claude_bin_dir() -> str | None:
-    """Find the directory containing the claude CLI binary."""
-    # Try current PATH (works if sudo preserves PATH or claude is in /usr/local/bin)
-    claude_path = shutil.which("claude")
-    if claude_path:
-        return str(Path(claude_path).resolve().parent)
-
-    # Try the invoking user's PATH (when running under sudo)
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
+def is_our_process(pid: int) -> bool:
+    """Verify PID is actually a run_bot.py process (guards against PID reuse)."""
+    try:
         result = subprocess.run(
-            ["sudo", "-u", sudo_user, "bash", "-lc", "which claude"],
+            ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return str(Path(result.stdout.strip()).resolve().parent)
+        return "run_bot.py" in result.stdout
+    except Exception:
+        return False
 
-    # Check common locations
-    for candidate in [
-        Path.home() / ".claude" / "bin",
-        Path("/usr/local/bin"),
-    ]:
-        if (candidate / "claude").is_file():
-            return str(candidate)
 
-    if sudo_user:
-        home = Path(f"/home/{sudo_user}")
-        for candidate in [
-            home / ".claude" / "bin",
-            home / ".local" / "bin",
-            home / ".npm-global" / "bin",
-        ]:
-            if (candidate / "claude").is_file():
-                return str(candidate)
-
+def read_pid_file(instance: str) -> int | None:
+    """Read and validate a PID file. Returns PID if process is alive, else None."""
+    pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
+    if not pid_file.is_file():
+        return None
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        return None
+    if is_process_alive(pid) and is_our_process(pid):
+        return pid
     return None
+
+
+def resolve_env_file(instance: str) -> Path | None:
+    """Find env file for an instance. Returns path or None."""
+    # Named instance: instances/<name>.env
+    named = INSTANCES_DIR / f"{instance}.env"
+    if named.is_file():
+        return named
+    # Default instance can use .env in plugin root
+    if instance == "default":
+        fallback = PLUGIN_DIR / ".env"
+        if fallback.is_file():
+            return fallback
+    return None
+
+
+def get_all_instances() -> list[str]:
+    """Discover all instances from env files and PID files."""
+    instances = set()
+    # From instances/*.env
+    if INSTANCES_DIR.is_dir():
+        for f in INSTANCES_DIR.glob("*.env"):
+            instances.add(f.stem)
+    # From .claudebot-*.pid files
+    for f in PLUGIN_DIR.glob(".claudebot-*.pid"):
+        name = f.name.removeprefix(".claudebot-").removesuffix(".pid")
+        instances.add(name)
+    # Check for default instance (.env exists or pid file exists)
+    if (PLUGIN_DIR / ".env").is_file():
+        instances.add("default")
+    return sorted(instances)
+
+
+def cleanup_orphan_container(instance: str) -> None:
+    """Stop and remove a Docker container if it exists."""
+    container = f"claudebot-mcp-{instance}"
+    subprocess.run(
+        ["docker", "stop", "-t", "10", container],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["docker", "rm", "-f", container],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
 
-def cmd_install(args: argparse.Namespace) -> None:
-    require_root("install")
-
-    # Find claude CLI
-    claude_bin_dir = find_claude_bin_dir()
-    if not claude_bin_dir:
-        print("Warning: could not find 'claude' CLI binary.", file=sys.stderr)
-        print("The service may fail to start. Ensure claude is installed", file=sys.stderr)
-        print("and re-run 'claudebot-ctl install' to update the PATH.", file=sys.stderr)
-
-    # Rewrite unit file paths based on actual install location
-    unit_text = SOURCE_UNIT.read_text()
-    python_path = shutil.which("python3") or "/usr/bin/python3"
-    unit_text = unit_text.replace(
-        "/usr/bin/python3 /opt/claudebot/scripts/run_bot.py",
-        f"{python_path} {PLUGIN_DIR / 'scripts' / 'run_bot.py'}",
-    )
-    unit_text = unit_text.replace(
-        "WorkingDirectory=/opt/claudebot",
-        f"WorkingDirectory={PLUGIN_DIR}",
-    )
-
-    # Inject claude CLI bin dir into the service PATH
-    default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    if claude_bin_dir:
-        service_path = f"{claude_bin_dir}:{default_path}"
-    else:
-        service_path = default_path
-    unit_text = unit_text.replace(
-        f'Environment="PATH={default_path}"',
-        f'Environment="PATH={service_path}"',
-    )
-
-    dest = SYSTEMD_DIR / UNIT_FILE
-    dest.write_text(unit_text)
-    print(f"Installed unit file to {dest}")
-    if claude_bin_dir:
-        print(f"  claude CLI found at: {claude_bin_dir}")
-
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"Created {CONFIG_DIR} and {LOG_DIR}")
-
-    run(["systemctl", "daemon-reload"])
-    print("systemd reloaded. Next: claudebot-ctl add-instance <name>")
-
-
-def cmd_uninstall(args: argparse.Namespace) -> None:
-    require_root("uninstall")
-
-    dest = SYSTEMD_DIR / UNIT_FILE
-    if dest.exists():
-        dest.unlink()
-        print(f"Removed {dest}")
-    else:
-        print(f"Unit file not found at {dest}")
-
-    run(["systemctl", "daemon-reload"])
-    print("systemd reloaded. Config and logs preserved.")
-
-
-def cmd_add_instance(args: argparse.Namespace) -> None:
-    require_root("add-instance")
+def cmd_init(args: argparse.Namespace) -> None:
     name = args.name
+    env_dest = INSTANCES_DIR / f"{name}.env"
 
-    env_dest = CONFIG_DIR / f"{name}.env"
     if env_dest.exists():
         print(f"Error: {env_dest} already exists", file=sys.stderr)
         sys.exit(1)
 
+    if not EXAMPLE_ENV.is_file():
+        print(f"Error: template not found at {EXAMPLE_ENV}", file=sys.stderr)
+        sys.exit(1)
+
+    INSTANCES_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(EXAMPLE_ENV, env_dest)
+
+    log_dir = PLUGIN_DIR / "logs" / name
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Created {env_dest}")
-
-    instance_log_dir = LOG_DIR / name
-    instance_log_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Created {instance_log_dir}")
-
+    print(f"Created {log_dir}")
     print(f"\nNext steps:")
     print(f"  1. Edit {env_dest} with your token and guild ID")
-    print(f"  2. sudo claudebot-ctl start {name}")
-    print(f"  3. sudo claudebot-ctl enable {name}  # for boot persistence")
+    print(f"  2. claudebot-ctl start {name}")
 
 
 def cmd_start(args: argparse.Namespace) -> None:
-    require_root("start")
-    run(["systemctl", "start", f"{UNIT_NAME}{args.instance}"])
-    print(f"Started claudebot@{args.instance}")
+    instance = args.instance
+
+    # Already running?
+    existing_pid = read_pid_file(instance)
+    if existing_pid:
+        print(f"Instance '{instance}' is already running (PID {existing_pid})")
+        sys.exit(1)
+
+    # Resolve env file
+    env_file = resolve_env_file(instance)
+    if not env_file:
+        print(f"Error: no env file found for instance '{instance}'", file=sys.stderr)
+        if instance != "default":
+            print(f"  Run: claudebot-ctl init {instance}", file=sys.stderr)
+        else:
+            print(f"  Create .env in {PLUGIN_DIR} or run: claudebot-ctl init {instance}", file=sys.stderr)
+        sys.exit(1)
+
+    # Open log file for stdout/stderr
+    log_dir = PLUGIN_DIR / "logs" / instance
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"bot-ctl-{instance}.log"
+    log_file = open(log_path, "a")
+
+    # Build command
+    cmd = [
+        sys.executable,
+        str(PLUGIN_DIR / "scripts" / "run_bot.py"),
+        "--instance", instance,
+        "--env-file", str(env_file),
+    ]
+
+    # Start detached process
+    proc = subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        stdout=log_file,
+        stderr=log_file,
+        stdin=subprocess.DEVNULL,
+        cwd=str(PLUGIN_DIR),
+    )
+    log_file.close()
+
+    # Wait a few seconds and verify it's still alive
+    print(f"Starting instance '{instance}' (PID {proc.pid})...")
+    time.sleep(3)
+
+    if proc.poll() is not None:
+        print(f"Error: process exited immediately (code {proc.returncode})", file=sys.stderr)
+        print(f"  Check logs: {log_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Verify PID file appeared (run_bot.py writes it)
+    pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
+    if pid_file.is_file():
+        print(f"Instance '{instance}' started successfully (PID {proc.pid})")
+    else:
+        print(f"Instance '{instance}' started (PID {proc.pid}) but PID file not yet written")
+        print(f"  Check logs: {log_path}")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
-    require_root("stop")
-    run(["systemctl", "stop", f"{UNIT_NAME}{args.instance}"])
-    print(f"Stopped claudebot@{args.instance}")
+    instance = args.instance
+    pid = read_pid_file(instance)
+
+    if not pid:
+        # Check for stale PID file
+        pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
+        if pid_file.is_file():
+            pid_file.unlink()
+            print(f"Removed stale PID file for '{instance}'")
+        else:
+            print(f"Instance '{instance}' is not running")
+        # Still try to clean up Docker container
+        cleanup_orphan_container(instance)
+        return
+
+    print(f"Stopping instance '{instance}' (PID {pid})...")
+
+    # Send SIGTERM — run_bot.py handles graceful shutdown (docker stop, cleanup)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print(f"Process already exited")
+        cleanup_orphan_container(instance)
+        return
+
+    # Wait up to 20s for graceful shutdown (run_bot.py needs ~15s for docker stop)
+    for _ in range(40):
+        if not is_process_alive(pid):
+            break
+        time.sleep(0.5)
+    else:
+        # Still alive after 20s — force kill
+        print(f"Process didn't exit gracefully, sending SIGKILL")
+        try:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(1)
+        except ProcessLookupError:
+            pass
+
+    # Safety net: clean up Docker container if still running
+    cleanup_orphan_container(instance)
+
+    # Clean PID file if run_bot.py didn't
+    pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
+    pid_file.unlink(missing_ok=True)
+
+    print(f"Instance '{instance}' stopped")
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
-    require_root("restart")
-    run(["systemctl", "restart", f"{UNIT_NAME}{args.instance}"])
-    print(f"Restarted claudebot@{args.instance}")
-
-
-def cmd_enable(args: argparse.Namespace) -> None:
-    require_root("enable")
-    run(["systemctl", "enable", f"{UNIT_NAME}{args.instance}"])
-    print(f"Enabled claudebot@{args.instance} (will start on boot)")
-
-
-def cmd_disable(args: argparse.Namespace) -> None:
-    require_root("disable")
-    run(["systemctl", "disable", f"{UNIT_NAME}{args.instance}"])
-    print(f"Disabled claudebot@{args.instance} (will not start on boot)")
+    cmd_stop(args)
+    time.sleep(1)
+    cmd_start(args)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     if args.instance:
-        run(["systemctl", "status", f"{UNIT_NAME}{args.instance}"], check=False)
+        instances = [args.instance]
     else:
-        # Show status of all instances
-        run(["systemctl", "list-units", f"{UNIT_NAME}*", "--no-pager"], check=False)
+        instances = get_all_instances()
+
+    if not instances:
+        print("No instances found")
+        return
+
+    for inst in instances:
+        pid = read_pid_file(inst)
+        env = resolve_env_file(inst)
+        env_str = str(env) if env else "(no env file)"
+
+        if pid:
+            print(f"  {inst}: running (PID {pid})  [{env_str}]")
+        else:
+            # Check for stale PID file
+            pid_file = PLUGIN_DIR / f".claudebot-{inst}.pid"
+            if pid_file.is_file():
+                print(f"  {inst}: dead (stale PID file)  [{env_str}]")
+            else:
+                print(f"  {inst}: stopped  [{env_str}]")
 
 
 def cmd_logs(args: argparse.Namespace) -> None:
     instance = args.instance
+    log_dir = PLUGIN_DIR / "logs" / instance
 
-    # Combine systemd journal log + bot log + mcp log
+    if not log_dir.is_dir():
+        print(f"No log directory found for instance '{instance}'", file=sys.stderr)
+        sys.exit(1)
+
+    # Find most recent bot and mcp logs
     log_files = []
-
-    # Instance bot/mcp logs from plugin dir
-    instance_log_dir = PLUGIN_DIR / "logs" / instance
-    if instance_log_dir.is_dir():
-        # Find most recent bot and mcp logs
-        bot_logs = sorted(instance_log_dir.glob("bot-*.log"))
-        mcp_logs = sorted(instance_log_dir.glob("mcp-*.log"))
-        if bot_logs:
-            log_files.append(str(bot_logs[-1]))
-        if mcp_logs:
-            log_files.append(str(mcp_logs[-1]))
-
-    # Systemd log
-    systemd_log = LOG_DIR / f"{instance}.log"
-    if systemd_log.is_file():
-        log_files.append(str(systemd_log))
+    bot_logs = sorted(log_dir.glob("bot-*.log"))
+    mcp_logs = sorted(log_dir.glob("mcp-*.log"))
+    if bot_logs:
+        log_files.append(str(bot_logs[-1]))
+    if mcp_logs:
+        log_files.append(str(mcp_logs[-1]))
 
     if not log_files:
         print(f"No log files found for instance '{instance}'", file=sys.stderr)
@@ -227,13 +306,53 @@ def cmd_logs(args: argparse.Namespace) -> None:
     tail_cmd.extend(log_files)
 
     try:
-        run(tail_cmd, check=False)
+        subprocess.run(tail_cmd, check=False)
     except KeyboardInterrupt:
         pass
 
 
 def cmd_list(args: argparse.Namespace) -> None:
-    run(["systemctl", "list-units", f"{UNIT_NAME}*", "--no-pager"], check=False)
+    # Delegate to status with no specific instance
+    ns = argparse.Namespace(instance=None)
+    cmd_status(ns)
+
+
+def cmd_clean(args: argparse.Namespace) -> None:
+    instance = args.instance
+
+    # Remove stale PID file
+    pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
+    if pid_file.is_file():
+        pid = read_pid_file(instance)
+        if pid:
+            print(f"Instance '{instance}' is still running (PID {pid}), not cleaning")
+            sys.exit(1)
+        pid_file.unlink()
+        print(f"Removed stale PID file: {pid_file}")
+
+    # Stop orphaned Docker container
+    container = f"claudebot-mcp-{instance}"
+    result = subprocess.run(
+        ["docker", "inspect", container],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        cleanup_orphan_container(instance)
+        print(f"Stopped orphaned container: {container}")
+    else:
+        print(f"No orphaned container found for '{instance}'")
+
+    # Remove stale runtime config
+    runtime_config = PLUGIN_DIR / f".mcp.runtime-{instance}.json"
+    if runtime_config.is_file():
+        runtime_config.unlink()
+        print(f"Removed stale runtime config: {runtime_config}")
+
+    # Remove stale session file
+    session_file = PLUGIN_DIR / f".bot-session-{instance}.id"
+    if session_file.is_file():
+        session_file.unlink()
+        print(f"Removed stale session file: {session_file}")
 
 
 # ---------------------------------------------------------------------------
@@ -243,43 +362,40 @@ def cmd_list(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="claudebot-ctl",
-        description="Manage claudebot systemd instances",
+        description="Manage claudebot instances (userland, no root required)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("install", help="Install systemd unit file and create directories")
-    sub.add_parser("uninstall", help="Remove systemd unit file (keeps configs and logs)")
-
-    p = sub.add_parser("add-instance", help="Create a new instance env file")
+    p = sub.add_parser("init", help="Create a new instance env file and log directory")
     p.add_argument("name", help="Instance name (e.g. 'main', 'dev')")
 
-    for cmd in ("start", "stop", "restart", "enable", "disable"):
+    for cmd in ("start", "stop", "restart"):
         p = sub.add_parser(cmd, help=f"{cmd.capitalize()} a claudebot instance")
         p.add_argument("instance", help="Instance name")
 
-    p = sub.add_parser("status", help="Show instance status (or all if no instance given)")
+    p = sub.add_parser("status", help="Show instance status (or all if no name given)")
     p.add_argument("instance", nargs="?", default=None, help="Instance name (optional)")
 
     p = sub.add_parser("logs", help="Tail instance log files")
     p.add_argument("instance", help="Instance name")
     p.add_argument("--follow", "-f", action="store_true", help="Follow log output")
 
-    sub.add_parser("list", help="List all claudebot instances")
+    sub.add_parser("list", help="List all instances and their status")
+
+    p = sub.add_parser("clean", help="Remove stale PID files and orphaned containers")
+    p.add_argument("instance", help="Instance name")
 
     args = parser.parse_args()
 
     commands = {
-        "install": cmd_install,
-        "uninstall": cmd_uninstall,
-        "add-instance": cmd_add_instance,
+        "init": cmd_init,
         "start": cmd_start,
         "stop": cmd_stop,
         "restart": cmd_restart,
-        "enable": cmd_enable,
-        "disable": cmd_disable,
         "status": cmd_status,
         "logs": cmd_logs,
         "list": cmd_list,
+        "clean": cmd_clean,
     }
     commands[args.command](args)
 
