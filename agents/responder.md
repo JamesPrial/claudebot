@@ -84,3 +84,10 @@ Sometimes a reaction is better than (or in addition to) a full message:
 
 **Output:**
 After sending the message via `discord_send_message`, confirm what was sent. The response has already been delivered to Discord — no text relay is needed.
+
+Include a `LOG:` section in your output for the orchestrating session to relay:
+```
+LOG:
+level=INFO component=responder msg="Response sent" channel=<channel_name> message_id=<original_id> length=<char_count>
+```
+At DEBUG level (when told `Current log level: DEBUG`), add: `level=DEBUG component=responder msg="Response preview" preview="<first 80 chars of response>"`

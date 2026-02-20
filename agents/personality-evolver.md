@@ -89,3 +89,9 @@ Personality evolved:
 - Trait absorbed: [description]
 - Personality now has [N] core traits
 ```
+
+Include a `LOG:` section in your output for the orchestrating session to relay:
+```
+LOG:
+level=INFO component=personality-evolver msg="Trait absorbed" source=<username> trait="<brief description>" total_traits=<N>
+```

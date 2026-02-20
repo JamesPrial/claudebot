@@ -175,6 +175,43 @@ See `references/decision-framework.md` for detailed triage logic including:
 - Typing indicator and reaction guidance
 - Examples of each decision type
 
+## Logging
+
+Claudebot uses structured key=value logging with level filtering (DEBUG, INFO, WARN, ERROR).
+
+### Setup at Session Start
+
+1. Read `CLAUDEBOT_LOG_LEVEL` from the environment (default: `INFO`)
+2. Read per-component overrides from `.claude/claudebot.local.md` YAML `logging` key (e.g., `logging: { triage: DEBUG }`)
+3. Determine the effective log level for each agent: per-component override if set, otherwise the global level
+
+### Logging Mechanisms
+
+**Direct logging** (agents with Bash tool — executor, screamer): These agents source `log-lib.sh` and call `log_info`/`log_error`/`log_debug` directly. No relay needed.
+
+**Relay logging** (agents without Bash — triage, responder, researcher, memory-manager, personality-evolver): These agents include a `LOG:` section in their output. After an agent returns, relay qualifying entries to the log file:
+
+```bash
+# After agent completes, if output contains LOG: lines:
+if [[ -n "${CLAUDEBOT_PLUGIN_DIR:-}" && -f "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh" ]]; then
+  LOG_COMPONENT=relay source "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh"
+  # Write each LOG: line that meets the effective level threshold
+fi
+```
+
+### Dispatching Agents with Log Level
+
+When dispatching any agent, include the effective log level in the prompt context:
+- `Current log level: INFO` (or whatever the effective level is for that component)
+- Agents producing `LOG:` output should only include entries at or above this level
+
+### Level Filtering for Relay
+
+When relaying `LOG:` entries from agent output:
+1. Parse the `level=` field from each entry
+2. Compare against the effective threshold for that component
+3. Only write entries that meet or exceed the threshold to the log file via Bash
+
 ## Reference Files
 
 - **`references/memory-schema.md`** - Detailed format specifications for all 5 memory files

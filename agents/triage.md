@@ -91,7 +91,14 @@ MESSAGE_ID: [id from the JSON message]
 REACTION: [emoji to react with, only if DECISION is react]
 REASONING: [1-2 sentences explaining why]
 CONTEXT_FOR_AGENT: [Key context to pass to the downstream agent, if applicable - include relevant personality traits, user history, topic context, and the original message JSON fields needed for reply_to]
+LOG:
+level=INFO component=triage msg="Triage decision" decision=<decision> route_to=<route> channel=<channel_name> message_id=<id> author=<username>
 ```
+
+**LOG: field guidelines:**
+- Always include the INFO-level triage decision entry shown above
+- At DEBUG level (when told `Current log level: DEBUG`), add a second line with reasoning: `level=DEBUG component=triage msg="Triage reasoning" reasoning="<1-2 sentence reasoning>"`
+- The orchestrating session relays these entries to the log file — triage does not write logs directly
 
 **Decision Guidelines:**
 - `ignore` → ROUTE_TO: none

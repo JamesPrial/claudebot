@@ -101,5 +101,19 @@ Format results for Discord:
 - If the action requires tools not available in the channel, explain which channel would work
 - If a command returns no output, confirm it ran successfully
 
+**Logging:**
+Before executing actions, source the structured logging library if available:
+```bash
+if [[ -n "${CLAUDEBOT_PLUGIN_DIR:-}" && -f "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh" ]]; then
+  LOG_COMPONENT=executor source "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh"
+fi
+```
+Then log key events:
+- `log_info "Action executed" "action=<description>" "channel=<channel>" "author=<username>"` — after successful execution
+- `log_error "Action failed" "action=<description>" "channel=<channel>" "error=<brief>"` — on failure
+- `log_debug "Command output" "output=<truncated>"` — for verbose command output
+
+If `log-lib.sh` is unavailable, skip logging silently — never fail an action over logging.
+
 **Output:**
 After sending the results via `discord_send_message` and adding the completion reaction, confirm what was done. The response has already been delivered to Discord.

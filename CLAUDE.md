@@ -86,6 +86,25 @@ Available presets: classic, whisper, death-metal, glitch, banshee, robot.
 
 All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_poll_messages` (primary message intake), `discord_send_message` (with `reply_to` for threading), `discord_get_messages`, `discord_typing`, `discord_add_reaction`, `discord_edit_message`, `discord_get_channels`, `discord_get_guild`.
 
+## Logging
+
+Structured key=value logging with level filtering across all components.
+
+**Format:** `2026-02-20T14:30:00 level=INFO component=run-bot msg="Starting poll loop" interval=30s`
+
+**Levels:** `DEBUG` < `INFO` < `WARN` < `ERROR` (default: `INFO`)
+
+**Configuration:**
+- Global: `CLAUDEBOT_LOG_LEVEL` env var (set in `.env` or export)
+- Per-component: `logging` key in `.claude/claudebot.local.md` YAML (e.g., `logging: { triage: DEBUG }`)
+- Per-component overrides take precedence over the global level
+
+**Two logging mechanisms:**
+- **Direct** (Bash-capable agents: executor, screamer, run-bot.sh): Source `scripts/log-lib.sh`, call `log_info`/`log_error`/`log_debug`/`log_warn`
+- **Relay** (non-Bash agents: triage, responder, researcher, memory-manager, personality-evolver): Include `LOG:` section in agent output; the orchestrating session relays qualifying entries to the log file via Bash
+
+**Library:** `scripts/log-lib.sh` — sourceable bash library (~45 lines). Set `LOG_COMPONENT` before sourcing. Writes to stderr and appends to `logs/bot-YYYYMMDD.log` if `CLAUDEBOT_PLUGIN_DIR` is set.
+
 ## Conventions
 
 - Agents send responses directly to Discord via MCP tools (not by returning text)

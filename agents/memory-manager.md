@@ -101,3 +101,9 @@ Memory update complete:
 - relationships.md: [what changed]
 - action-items.md: [what changed]
 ```
+
+Include a `LOG:` section in your output for the orchestrating session to relay:
+```
+LOG:
+level=INFO component=memory-manager msg="Memory update complete" users_changed=<yes|no> topics_changed=<yes|no> relationships_changed=<yes|no> action_items_changed=<yes|no>
+```

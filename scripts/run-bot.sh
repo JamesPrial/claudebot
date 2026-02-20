@@ -15,6 +15,12 @@ if [[ -f "${PLUGIN_DIR}/.env" ]]; then
   set +a
 fi
 
+# Structured logging
+export CLAUDEBOT_LOG_LEVEL="${CLAUDEBOT_LOG_LEVEL:-INFO}"
+export CLAUDEBOT_PLUGIN_DIR="$PLUGIN_DIR"
+LOG_COMPONENT="run-bot"
+source "${SCRIPT_DIR}/log-lib.sh"
+
 POLL_TIMEOUT="${CLAUDEBOT_POLL_TIMEOUT:-30}"
 MAX_CONSECUTIVE_FAILURES="${CLAUDEBOT_MAX_FAILURES:-5}"
 MCP_PORT="${CLAUDEBOT_MCP_PORT:-8080}"
@@ -24,9 +30,6 @@ LOG_FILE="${LOG_DIR}/bot-$(date '+%Y%m%d').log"
 MCP_LOG_FILE="${LOG_DIR}/mcp-$(date '+%Y%m%d').log"
 SESSION_FILE="${PLUGIN_DIR}/.bot-session-id"
 MCP_LOG_PID=""
-export CLAUDEBOT_PLUGIN_DIR="$PLUGIN_DIR"
-
-log() { echo "[run-bot] $(date '+%H:%M:%S') $*" | tee -a "$LOG_FILE" >&2; }
 
 SHUTTING_DOWN=false
 
@@ -35,7 +38,7 @@ cleanup() {
   $SHUTTING_DOWN && return
   SHUTTING_DOWN=true
 
-  log "Shutting down — killing child processes..."
+  log_info "Shutting down — killing child processes"
 
   # Kill MCP log streamer first to avoid broken-pipe noise
   if [[ -n "$MCP_LOG_PID" ]]; then
@@ -47,32 +50,32 @@ cleanup() {
   # Wait briefly for children to exit
   wait 2>/dev/null || true
 
-  log "Stopping MCP daemon container..."
+  log_info "Stopping MCP daemon container"
   docker stop -t 10 "$MCP_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$MCP_CONTAINER" >/dev/null 2>&1 || true
 
   if [[ -f "$SESSION_FILE" ]]; then
-    log "Session ID preserved in ${SESSION_FILE} for restart recovery"
+    log_info "Session ID preserved for restart recovery" "file=${SESSION_FILE}"
   fi
-  log "Shutdown complete."
+  log_info "Shutdown complete"
 }
 trap cleanup EXIT INT TERM
 
 # --- Preflight checks ---
 for var in CLAUDEBOT_DISCORD_TOKEN CLAUDEBOT_DISCORD_GUILD_ID; do
   if [[ -z "${!var:-}" ]]; then
-    log "ERROR: ${var} is not set"
+    log_error "Required env var is not set" "var=${var}"
     exit 1
   fi
 done
 
 if ! command -v claude &>/dev/null; then
-  log "ERROR: claude CLI is not installed"
+  log_error "claude CLI is not installed"
   exit 1
 fi
 
 if ! command -v docker &>/dev/null; then
-  log "ERROR: docker is not installed"
+  log_error "docker is not installed"
   exit 1
 fi
 
@@ -80,14 +83,14 @@ fi
 mkdir -p "$LOG_DIR"
 
 # --- Pre-pull Docker images ---
-log "Pre-pulling go-scream image..."
-docker pull --platform linux/arm64 ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
+log_info "Pre-pulling go-scream image"
+docker pull --platform linux/arm64 ghcr.io/jamesprial/go-scream:latest || log_warn "Failed to pull go-scream image (voice screams may not work)"
 
-log "Pre-pulling MCP Docker image..."
-docker pull --platform linux/arm64 ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 | tee -a "$LOG_FILE"
+log_info "Pre-pulling MCP Docker image"
+docker pull --platform linux/arm64 ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 >&2
 
 # --- Start MCP daemon container ---
-log "Starting MCP daemon on port ${MCP_PORT}..."
+log_info "Starting MCP daemon" "port=${MCP_PORT}"
 docker rm -f "$MCP_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$MCP_CONTAINER" \
   --platform linux/arm64 \
@@ -97,42 +100,42 @@ docker run -d --name "$MCP_CONTAINER" \
   ghcr.io/jamesprial/claudebot-mcp:latest
 
 # Wait for container to be running
-log "Waiting for MCP container to start..."
+log_info "Waiting for MCP container to start"
 for i in $(seq 1 30); do
   if docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
     break
   fi
   if [[ $i -eq 30 ]]; then
-    log "ERROR: MCP container failed to start within 30s"
-    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 | tee -a "$LOG_FILE"
+    log_error "MCP container failed to start within 30s"
+    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 >&2
     exit 1
   fi
   sleep 1
 done
 
 # Wait for Discord connection
-log "Waiting for Discord connection..."
+log_info "Waiting for Discord connection"
 for i in $(seq 1 30); do
   if docker logs "$MCP_CONTAINER" 2>&1 | grep -q "discord: connected as"; then
-    log "MCP daemon connected to Discord"
+    log_info "MCP daemon connected to Discord"
     break
   fi
   if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
-    log "ERROR: MCP container exited unexpectedly"
-    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 | tee -a "$LOG_FILE"
+    log_error "MCP container exited unexpectedly"
+    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 >&2
     exit 1
   fi
   if [[ $i -eq 30 ]]; then
-    log "WARNING: Timed out waiting for Discord connection, proceeding anyway..."
+    log_warn "Timed out waiting for Discord connection, proceeding anyway"
   fi
   sleep 1
 done
 
 # --- Start MCP daemon log stream ---
-log "Starting MCP daemon log stream..."
+log_info "Starting MCP daemon log stream"
 docker logs -f --timestamps "$MCP_CONTAINER" >> "$MCP_LOG_FILE" 2>&1 &
 MCP_LOG_PID=$!
-log "MCP log streamer PID: ${MCP_LOG_PID}"
+log_debug "MCP log streamer started" "pid=${MCP_LOG_PID}"
 
 # --- Generate runtime .mcp.json ---
 RUNTIME_MCP_CONFIG="${PLUGIN_DIR}/.mcp.runtime.json"
@@ -146,7 +149,7 @@ cat > "$RUNTIME_MCP_CONFIG" <<EOF
   }
 }
 EOF
-log "Generated runtime MCP config at ${RUNTIME_MCP_CONFIG}"
+log_info "Generated runtime MCP config" "path=${RUNTIME_MCP_CONFIG}"
 
 # --- Common claude flags ---
 CLAUDE_FLAGS=(
@@ -156,6 +159,7 @@ CLAUDE_FLAGS=(
   --dangerously-skip-permissions
   --output-format json
 )
+log_debug "Claude flags configured" "plugin_dir=${PLUGIN_DIR}" "mcp_config=${RUNTIME_MCP_CONFIG}"
 
 # --- Initialize or resume session ---
 INIT_PROMPT="Session starting. Load the discord-bot skill and initialize. \
@@ -167,50 +171,50 @@ SESSION_ID=""
 # Check for existing session to resume
 if [[ -f "$SESSION_FILE" ]]; then
   EXISTING_SESSION="$(cat "$SESSION_FILE")"
-  log "Found existing session: ${EXISTING_SESSION}, attempting resume..."
+  log_info "Found existing session, attempting resume" "session=${EXISTING_SESSION}"
 
   if timeout 180 claude "${CLAUDE_FLAGS[@]}" --resume "$EXISTING_SESSION" \
     "$INIT_PROMPT" < /dev/null >>"$LOG_FILE" 2>&1; then
     SESSION_ID="$EXISTING_SESSION"
-    log "Resumed session: ${SESSION_ID}"
+    log_info "Resumed session" "session=${SESSION_ID}"
   else
-    log "Failed to resume, starting fresh session"
+    log_warn "Failed to resume, starting fresh session"
     rm -f "$SESSION_FILE"
   fi
 fi
 
 if [[ -z "$SESSION_ID" ]]; then
   SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-  log "Creating new session: ${SESSION_ID}"
+  log_info "Creating new session" "session=${SESSION_ID}"
 
   if ! timeout 180 claude "${CLAUDE_FLAGS[@]}" --session-id "$SESSION_ID" \
     "$INIT_PROMPT" < /dev/null >>"$LOG_FILE" 2>&1; then
-    log "ERROR: Failed to initialize session"
+    log_error "Failed to initialize session"
     exit 1
   fi
 
-  log "Session initialized successfully"
+  log_info "Session initialized successfully"
 fi
 
 # Persist session ID for crash recovery
 echo "$SESSION_ID" > "$SESSION_FILE"
-log "Session ID saved to ${SESSION_FILE}"
+log_debug "Session ID saved" "file=${SESSION_FILE}"
 
 # --- Poll loop ---
-log "Starting message poll loop (interval: ${POLL_TIMEOUT}s)..."
+log_info "Starting message poll loop" "interval=${POLL_TIMEOUT}s"
 
 consecutive_failures=0
 
 while true; do
   # Check that daemon is still running
   if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
-    log "ERROR: MCP daemon container died, exiting"
+    log_error "MCP daemon container died, exiting"
     exit 1
   fi
 
   # Check that MCP log streamer is still running
   if [[ -n "$MCP_LOG_PID" ]] && ! kill -0 "$MCP_LOG_PID" 2>/dev/null; then
-    log "WARNING: MCP log streamer died, restarting..."
+    log_warn "MCP log streamer died, restarting"
     docker logs -f --timestamps "$MCP_CONTAINER" >> "$MCP_LOG_FILE" 2>&1 &
     MCP_LOG_PID=$!
   fi
@@ -223,17 +227,17 @@ with timeout_seconds=${POLL_TIMEOUT} and limit=10. Process any messages received
     consecutive_failures=0
   else
     consecutive_failures=$((consecutive_failures + 1))
-    log "WARNING: Poll failed (consecutive: ${consecutive_failures}/${MAX_CONSECUTIVE_FAILURES})"
+    log_warn "Poll failed" "consecutive=${consecutive_failures}/${MAX_CONSECUTIVE_FAILURES}"
 
     if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
-      log "ERROR: Too many consecutive failures, exiting"
+      log_error "Too many consecutive failures, exiting"
       exit 1
     fi
 
     # Backoff: sleep for (failures * 5) seconds, capped at POLL_TIMEOUT
     backoff=$((consecutive_failures * 5))
     [[ $backoff -gt $POLL_TIMEOUT ]] && backoff=$POLL_TIMEOUT
-    log "Backing off for ${backoff}s..."
+    log_info "Backing off" "seconds=${backoff}"
     sleep "$backoff"
     continue
   fi

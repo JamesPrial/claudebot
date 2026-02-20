@@ -93,3 +93,10 @@ Format research findings for Discord:
 
 **Output:**
 After sending the findings via `discord_send_message`, confirm what was sent. The response has already been delivered to Discord.
+
+Include a `LOG:` section in your output for the orchestrating session to relay:
+```
+LOG:
+level=INFO component=researcher msg="Research completed" channel=<channel_name> message_id=<original_id> sources=<count>
+```
+At DEBUG level (when told `Current log level: DEBUG`), add: `level=DEBUG component=researcher msg="Search queries" queries="<comma-separated queries used>"`

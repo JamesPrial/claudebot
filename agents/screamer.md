@@ -82,20 +82,27 @@ SCREAM_OUTPUT="$(docker run --rm --network host --platform linux/arm64 \
   "$CLAUDEBOT_DISCORD_GUILD_ID" <channel_id> 2>&1)"
 SCREAM_EXIT=$?
 
-# Log the scream output (skip if plugin dir unavailable)
+# Structured logging via log-lib.sh
+if [[ -n "${CLAUDEBOT_PLUGIN_DIR:-}" && -f "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh" ]]; then
+  LOG_COMPONENT=screamer source "${CLAUDEBOT_PLUGIN_DIR}/scripts/log-lib.sh"
+  if [[ "$SCREAM_EXIT" -eq 0 ]]; then
+    log_info "Scream completed" "channel=<channel_id>" "preset=<preset>"
+  else
+    log_error "Scream failed" "channel=<channel_id>" "preset=<preset>" "exit=${SCREAM_EXIT}"
+  fi
+  log_debug "Scream docker output" "output=${SCREAM_OUTPUT}"
+fi
+
+# Raw docker output to scream-specific log
 if [[ -n "${CLAUDEBOT_PLUGIN_DIR:-}" && -d "${CLAUDEBOT_PLUGIN_DIR}/logs" ]]; then
-  SCREAM_LOG="${CLAUDEBOT_PLUGIN_DIR}/logs/scream-$(date '+%Y%m%d').log"
-  {
-    printf '[scream] %s channel=%s preset=%s exit=%d\n' \
-      "$(date '+%H:%M:%S')" "<channel_id>" "<preset>" "$SCREAM_EXIT"
-    echo "$SCREAM_OUTPUT"
-  } >> "$SCREAM_LOG"
+  echo "$SCREAM_OUTPUT" >> "${CLAUDEBOT_PLUGIN_DIR}/logs/scream-$(date '+%Y%m%d').log"
 fi
 ```
 
 Key details:
 - Capture all Docker output into `$SCREAM_OUTPUT` and exit code into `$SCREAM_EXIT` so results can be logged and inspected
-- The log block is guarded — if `CLAUDEBOT_PLUGIN_DIR` is unset or `logs/` doesn't exist, logging is silently skipped (never fail the scream over logging)
+- Structured logging via `log-lib.sh` is guarded — if `CLAUDEBOT_PLUGIN_DIR` is unset or the library doesn't exist, logging is silently skipped (never fail the scream over logging)
+- Raw Docker output is also appended to the scream-specific log file for debugging
 - Replace `<channel_id>` and `<preset>` placeholders with actual values in both the docker command and the printf
 - `DISCORD_TOKEN` inside the container uses `CLAUDEBOT_DISCORD_TOKEN` from the host environment
 - `--network host` is required for Discord voice (UDP hole-punching)

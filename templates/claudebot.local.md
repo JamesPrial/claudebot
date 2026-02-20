@@ -12,6 +12,13 @@ channels:
 default_channel:
   tools: [WebSearch]
   respond_threshold: medium
+# log_level: INFO
+# logging:
+#   triage: DEBUG
+#   responder: INFO
+#   researcher: INFO
+#   executor: INFO
+#   screamer: INFO
 ---
 # Claudebot Settings
 
