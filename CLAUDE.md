@@ -9,22 +9,29 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 ## Running the Bot
 
 ```bash
-# Full lifecycle (starts Claude Code session with Docker MCP server, polls Discord)
+# Local foreground (default instance)
 python3 ./scripts/run_bot.py
+
+# Named instance (for multi-instance setups)
+python3 ./scripts/run_bot.py --instance main
+
+# With explicit env file
+python3 ./scripts/run_bot.py --instance main --env-file /etc/claudebot/main.env
 ```
 
 **Prerequisites:** Docker installed and running.
 
-Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, useful for multi-instance setups). See `.env.example` for all options.
+Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, must be unique per instance), `CLAUDEBOT_DOCKER_PLATFORM` (omit for auto-detect). See `.env.example` for all options.
 
 The MCP server (`claudebot-mcp`) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online. The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
 
-**Operational files** (gitignored):
-- `logs/bot-YYYYMMDD.log` — Daily log files from the runner
-- `logs/mcp-YYYYMMDD.log` — MCP daemon container output (streamed continuously)
-- `logs/scream-YYYYMMDD.log` — go-scream invocation output (appended per scream)
-- `.bot-session-id` — Persisted session ID for crash recovery across restarts
-- `.mcp.runtime.json` — Generated at startup with the daemon's HTTP URL
+**Operational files** (gitignored, `{instance}` defaults to `default`):
+- `logs/{instance}/bot-YYYYMMDD.log` — Daily log files from the runner
+- `logs/{instance}/mcp-YYYYMMDD.log` — MCP daemon container output (streamed continuously)
+- `logs/{instance}/scream-YYYYMMDD.log` — go-scream invocation output (appended per scream)
+- `.bot-session-{instance}.id` — Persisted session ID for crash recovery across restarts
+- `.mcp.runtime-{instance}.json` — Generated at startup with the daemon's HTTP URL
+- `.claudebot-{instance}.pid` — PID file for status checking
 
 ## Setup & Config
 
@@ -65,6 +72,9 @@ All agents send responses **directly to Discord via MCP tools** — they don't r
 | Settings template | `templates/claudebot.local.md` | Per-project config template |
 | Memory templates | `templates/memory/*.md` | Initial blank memory files |
 | Reference docs | `skills/discord-bot/references/` | Memory schema and decision framework |
+| Systemd unit | `systemd/claudebot@.service` | Template unit for daemon deployment |
+| Instance env template | `configs/example.env` | Per-instance env file template |
+| Management CLI | `scripts/claudebot-ctl` | systemctl wrapper for instance management |
 
 ## Memory System
 
@@ -106,6 +116,34 @@ Structured key=value logging with level filtering across all components.
 **Libraries:**
 - `scripts/log-lib.sh` — sourceable bash library for agents (~45 lines). Set `LOG_COMPONENT` before sourcing. Writes to stderr and appends to `logs/bot-YYYYMMDD.log` if `CLAUDEBOT_PLUGIN_DIR` is set.
 - `scripts/log_lib.py` — Python logging library used by `run_bot.py`. Same output format. Use `get_logger(component)` or CLI: `python3 log_lib.py <component> <level> <msg> [key=val ...]`
+
+## Daemon Deployment (systemd)
+
+For persistent Linux server deployment with auto-restart and boot persistence.
+
+**Initial setup:**
+```bash
+sudo claudebot-ctl install            # Install unit file, create /etc/claudebot/ and /var/log/claudebot/
+sudo claudebot-ctl add-instance main  # Create /etc/claudebot/main.env from template
+sudo vim /etc/claudebot/main.env      # Set token, guild ID, port
+sudo claudebot-ctl start main         # Start the instance
+sudo claudebot-ctl enable main        # Enable boot persistence
+```
+
+**Multi-instance:** Each instance gets its own env file (`/etc/claudebot/<name>.env`), Docker container (`claudebot-mcp-<name>`), and log subdirectory. Instances share the same plugin dir and project dir but use different tokens/guilds/ports.
+
+**Management commands:** `claudebot-ctl start|stop|restart|status|logs|enable|disable|list`
+
+**Log locations:**
+- systemd output: `/var/log/claudebot/<instance>.log`
+- Bot/MCP logs: `logs/<instance>/bot-YYYYMMDD.log`, `logs/<instance>/mcp-YYYYMMDD.log`
+
+**Troubleshooting:**
+- `claudebot-ctl status main` — Check if running, see recent output
+- `claudebot-ctl logs main -f` — Tail all log files for an instance
+- `journalctl -u claudebot@main` — Full systemd journal (if journald is also enabled)
+
+**Note:** `claudebot-ctl install` rewrites paths in the unit file to match the actual install location. The template at `systemd/claudebot@.service` uses placeholder paths (`/opt/claudebot`, `/usr/bin/python3`).
 
 ## Conventions
 

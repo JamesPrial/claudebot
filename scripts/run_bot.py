@@ -6,6 +6,7 @@ Discord gateway stays open and the bot appears always-online. Uses repeated
 `claude -p --resume` calls to maintain a persistent session across poll cycles.
 """
 
+import argparse
 import atexit
 import json
 import os
@@ -52,13 +53,43 @@ def load_dotenv(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLI arguments
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Claudebot lifecycle orchestrator")
+    parser.add_argument(
+        "--instance", default="default",
+        help="Instance name for multi-instance setups (default: 'default')",
+    )
+    parser.add_argument(
+        "--env-file", default=None,
+        help="Explicit path to env file (useful with systemd EnvironmentFile)",
+    )
+    return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Docker platform helper
+# ---------------------------------------------------------------------------
+
+def docker_platform_flags() -> list[str]:
+    """Return ['--platform', VALUE] if CLAUDEBOT_DOCKER_PLATFORM is set, else []."""
+    platform = os.environ.get("CLAUDEBOT_DOCKER_PLATFORM", "").strip()
+    if platform:
+        return ["--platform", platform]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle manager
 # ---------------------------------------------------------------------------
 
 class BotLifecycle:
-    def __init__(self, container_name: str, session_file: Path, log: "log_lib.Logger"):
+    def __init__(self, container_name: str, session_file: Path, pid_file: Path, log: "log_lib.Logger"):
         self.container_name = container_name
         self.session_file = session_file
+        self.pid_file = pid_file
         self.log = log
         self.shutting_down = False
         self.log_streamer: subprocess.Popen | None = None
@@ -110,6 +141,10 @@ class BotLifecycle:
 
         if self.session_file.is_file():
             self.log.info("Session ID preserved for restart recovery", f"file={self.session_file}")
+
+        # Remove PID file
+        self.pid_file.unlink(missing_ok=True)
+
         self.log.info("Shutdown complete")
 
 
@@ -137,9 +172,11 @@ def preflight_checks(log) -> None:
 # ---------------------------------------------------------------------------
 
 def pull_docker_images(log) -> None:
+    platform_flags = docker_platform_flags()
+
     log.info("Pre-pulling go-scream image")
     result = subprocess.run(
-        ["docker", "pull", "--platform", "linux/arm64", "ghcr.io/jamesprial/go-scream:latest"],
+        ["docker", "pull"] + platform_flags + ["ghcr.io/jamesprial/go-scream:latest"],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -147,7 +184,7 @@ def pull_docker_images(log) -> None:
 
     log.info("Pre-pulling MCP Docker image")
     result = subprocess.run(
-        ["docker", "pull", "--platform", "linux/arm64", "ghcr.io/jamesprial/claudebot-mcp:latest"],
+        ["docker", "pull"] + platform_flags + ["ghcr.io/jamesprial/claudebot-mcp:latest"],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -160,6 +197,7 @@ def pull_docker_images(log) -> None:
 
 
 def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
+    platform_flags = docker_platform_flags()
     log.info("Starting MCP daemon", f"port={mcp_port}")
     subprocess.run(
         ["docker", "rm", "-f", container_name],
@@ -168,7 +206,7 @@ def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
     subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,
-            "--platform", "linux/arm64",
+        ] + platform_flags + [
             "-p", f"{mcp_port}:8080",
             "-e", "CLAUDEBOT_DISCORD_TOKEN",
             "-e", "CLAUDEBOT_DISCORD_GUILD_ID",
@@ -251,8 +289,7 @@ def is_container_running(container_name: str) -> bool:
 # MCP config
 # ---------------------------------------------------------------------------
 
-def generate_mcp_config(mcp_port: int, log) -> Path:
-    config_path = PLUGIN_DIR / ".mcp.runtime.json"
+def generate_mcp_config(mcp_port: int, config_path: Path, log) -> Path:
     config = {
         "mcpServers": {
             "discord": {
@@ -376,7 +413,12 @@ def poll_loop(session_id: str, claude_flags: list[str], poll_timeout: int,
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Load .env
+    args = parse_args()
+    instance = args.instance
+
+    # Load env files: explicit --env-file first (if given), then .env as fallback
+    if args.env_file:
+        load_dotenv(Path(args.env_file))
     load_dotenv(PLUGIN_DIR / ".env")
 
     # Set up logging env
@@ -384,23 +426,32 @@ def main() -> None:
     os.environ["CLAUDEBOT_PLUGIN_DIR"] = str(PLUGIN_DIR)
     log = get_logger("run-bot")
 
+    log.info("Starting claudebot", f"instance={instance}")
+
     # Config from env
     poll_timeout = int(os.environ.get("CLAUDEBOT_POLL_TIMEOUT", "30"))
     max_failures = int(os.environ.get("CLAUDEBOT_MAX_FAILURES", "5"))
     mcp_port = int(os.environ.get("CLAUDEBOT_MCP_PORT", "8080"))
-    container_name = "claudebot-mcp-daemon"
-    log_dir = PLUGIN_DIR / "logs"
+
+    # Instance-specific paths
+    container_name = f"claudebot-mcp-{instance}"
+    log_dir = PLUGIN_DIR / "logs" / instance
     today = datetime.now().strftime("%Y%m%d")
     log_file = log_dir / f"bot-{today}.log"
     mcp_log_file = log_dir / f"mcp-{today}.log"
-    session_file = PLUGIN_DIR / ".bot-session-id"
+    session_file = PLUGIN_DIR / f".bot-session-{instance}.id"
+    runtime_config_path = PLUGIN_DIR / f".mcp.runtime-{instance}.json"
+    pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
 
     # Preflight
     preflight_checks(log)
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write PID file
+    pid_file.write_text(str(os.getpid()) + "\n")
 
     # Lifecycle
-    lifecycle = BotLifecycle(container_name, session_file, log)
+    lifecycle = BotLifecycle(container_name, session_file, pid_file, log)
     lifecycle.register_signals()
 
     # Docker
@@ -409,7 +460,7 @@ def main() -> None:
     start_log_streamer(container_name, mcp_log_file, lifecycle, log)
 
     # MCP config
-    runtime_config = generate_mcp_config(mcp_port, log)
+    runtime_config = generate_mcp_config(mcp_port, runtime_config_path, log)
 
     # Claude flags
     claude_flags = [

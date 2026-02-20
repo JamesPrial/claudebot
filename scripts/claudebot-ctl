@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""CLI for managing claudebot systemd instances."""
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+UNIT_NAME = "claudebot@"
+UNIT_FILE = "claudebot@.service"
+SYSTEMD_DIR = Path("/etc/systemd/system")
+CONFIG_DIR = Path("/etc/claudebot")
+LOG_DIR = Path("/var/log/claudebot")
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = SCRIPT_DIR.parent
+SOURCE_UNIT = PLUGIN_DIR / "systemd" / UNIT_FILE
+EXAMPLE_ENV = PLUGIN_DIR / "configs" / "example.env"
+
+
+def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=check)
+
+
+def require_root(action: str) -> None:
+    import os
+    if os.geteuid() != 0:
+        print(f"Error: '{action}' requires root. Run with sudo.", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_install(args: argparse.Namespace) -> None:
+    require_root("install")
+
+    # Rewrite unit file paths based on actual install location
+    unit_text = SOURCE_UNIT.read_text()
+    python_path = shutil.which("python3") or "/usr/bin/python3"
+    unit_text = unit_text.replace(
+        "/usr/bin/python3 /opt/claudebot/scripts/run_bot.py",
+        f"{python_path} {PLUGIN_DIR / 'scripts' / 'run_bot.py'}",
+    )
+    unit_text = unit_text.replace(
+        "WorkingDirectory=/opt/claudebot",
+        f"WorkingDirectory={PLUGIN_DIR}",
+    )
+
+    dest = SYSTEMD_DIR / UNIT_FILE
+    dest.write_text(unit_text)
+    print(f"Installed unit file to {dest}")
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Created {CONFIG_DIR} and {LOG_DIR}")
+
+    run(["systemctl", "daemon-reload"])
+    print("systemd reloaded. Next: claudebot-ctl add-instance <name>")
+
+
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    require_root("uninstall")
+
+    dest = SYSTEMD_DIR / UNIT_FILE
+    if dest.exists():
+        dest.unlink()
+        print(f"Removed {dest}")
+    else:
+        print(f"Unit file not found at {dest}")
+
+    run(["systemctl", "daemon-reload"])
+    print("systemd reloaded. Config and logs preserved.")
+
+
+def cmd_add_instance(args: argparse.Namespace) -> None:
+    require_root("add-instance")
+    name = args.name
+
+    env_dest = CONFIG_DIR / f"{name}.env"
+    if env_dest.exists():
+        print(f"Error: {env_dest} already exists", file=sys.stderr)
+        sys.exit(1)
+
+    shutil.copy2(EXAMPLE_ENV, env_dest)
+    print(f"Created {env_dest}")
+
+    instance_log_dir = LOG_DIR / name
+    instance_log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Created {instance_log_dir}")
+
+    print(f"\nNext steps:")
+    print(f"  1. Edit {env_dest} with your token and guild ID")
+    print(f"  2. sudo claudebot-ctl start {name}")
+    print(f"  3. sudo claudebot-ctl enable {name}  # for boot persistence")
+
+
+def cmd_start(args: argparse.Namespace) -> None:
+    require_root("start")
+    run(["systemctl", "start", f"{UNIT_NAME}{args.instance}"])
+    print(f"Started claudebot@{args.instance}")
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    require_root("stop")
+    run(["systemctl", "stop", f"{UNIT_NAME}{args.instance}"])
+    print(f"Stopped claudebot@{args.instance}")
+
+
+def cmd_restart(args: argparse.Namespace) -> None:
+    require_root("restart")
+    run(["systemctl", "restart", f"{UNIT_NAME}{args.instance}"])
+    print(f"Restarted claudebot@{args.instance}")
+
+
+def cmd_enable(args: argparse.Namespace) -> None:
+    require_root("enable")
+    run(["systemctl", "enable", f"{UNIT_NAME}{args.instance}"])
+    print(f"Enabled claudebot@{args.instance} (will start on boot)")
+
+
+def cmd_disable(args: argparse.Namespace) -> None:
+    require_root("disable")
+    run(["systemctl", "disable", f"{UNIT_NAME}{args.instance}"])
+    print(f"Disabled claudebot@{args.instance} (will not start on boot)")
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    if args.instance:
+        run(["systemctl", "status", f"{UNIT_NAME}{args.instance}"], check=False)
+    else:
+        # Show status of all instances
+        run(["systemctl", "list-units", f"{UNIT_NAME}*", "--no-pager"], check=False)
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
+    instance = args.instance
+
+    # Combine systemd journal log + bot log + mcp log
+    log_files = []
+
+    # Instance bot/mcp logs from plugin dir
+    instance_log_dir = PLUGIN_DIR / "logs" / instance
+    if instance_log_dir.is_dir():
+        # Find most recent bot and mcp logs
+        bot_logs = sorted(instance_log_dir.glob("bot-*.log"))
+        mcp_logs = sorted(instance_log_dir.glob("mcp-*.log"))
+        if bot_logs:
+            log_files.append(str(bot_logs[-1]))
+        if mcp_logs:
+            log_files.append(str(mcp_logs[-1]))
+
+    # Systemd log
+    systemd_log = LOG_DIR / f"{instance}.log"
+    if systemd_log.is_file():
+        log_files.append(str(systemd_log))
+
+    if not log_files:
+        print(f"No log files found for instance '{instance}'", file=sys.stderr)
+        sys.exit(1)
+
+    tail_cmd = ["tail"]
+    if args.follow:
+        tail_cmd.append("-f")
+    else:
+        tail_cmd.extend(["-n", "50"])
+    tail_cmd.extend(log_files)
+
+    try:
+        run(tail_cmd, check=False)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    run(["systemctl", "list-units", f"{UNIT_NAME}*", "--no-pager"], check=False)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="claudebot-ctl",
+        description="Manage claudebot systemd instances",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("install", help="Install systemd unit file and create directories")
+    sub.add_parser("uninstall", help="Remove systemd unit file (keeps configs and logs)")
+
+    p = sub.add_parser("add-instance", help="Create a new instance env file")
+    p.add_argument("name", help="Instance name (e.g. 'main', 'dev')")
+
+    for cmd in ("start", "stop", "restart", "enable", "disable"):
+        p = sub.add_parser(cmd, help=f"{cmd.capitalize()} a claudebot instance")
+        p.add_argument("instance", help="Instance name")
+
+    p = sub.add_parser("status", help="Show instance status (or all if no instance given)")
+    p.add_argument("instance", nargs="?", default=None, help="Instance name (optional)")
+
+    p = sub.add_parser("logs", help="Tail instance log files")
+    p.add_argument("instance", help="Instance name")
+    p.add_argument("--follow", "-f", action="store_true", help="Follow log output")
+
+    sub.add_parser("list", help="List all claudebot instances")
+
+    args = parser.parse_args()
+
+    commands = {
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "add-instance": cmd_add_instance,
+        "start": cmd_start,
+        "stop": cmd_stop,
+        "restart": cmd_restart,
+        "enable": cmd_enable,
+        "disable": cmd_disable,
+        "status": cmd_status,
+        "logs": cmd_logs,
+        "list": cmd_list,
+    }
+    commands[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
