@@ -17,7 +17,7 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 
 Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`. See `.env.example` for all options.
 
-The MCP server (`claudebot-mcp`) runs as a Docker container pulled from `ghcr.io/jamesprial/claudebot-mcp:latest`. Claude Code manages its lifecycle automatically via `.mcp.json` (stdio transport).
+The MCP server (`claudebot-mcp`) runs as a Docker container pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` via `.mcp.json` (stdio transport). The runner pre-pulls the image at startup, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
 
 ## Setup & Config
 
@@ -32,7 +32,7 @@ Per-project settings live in `.claude/claudebot.local.md` (YAML frontmatter for 
 ## Architecture
 
 Messages flow through a pipeline:
-1. **Runner** (`scripts/run-bot.sh`) sends periodic poll prompts to a headless Claude Code session via FIFO; Claude Code polls Discord via MCP tools
+1. **Runner** (`scripts/run-bot.sh`) sends periodic poll prompts via `claude -p --resume`, maintaining a persistent session; Claude Code polls Discord via MCP tools
 2. **Triage agent** (haiku) evaluates every message: ignore, react, respond, or act — sends typing indicator when engaging
 3. **Downstream agent** handles the routed action:
    - `responder` (sonnet) — personality-driven replies
@@ -86,4 +86,4 @@ All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_p
 - Voice screams are played via Docker (go-scream image), not by directly executing a binary
 - The screamer agent uses `--network host` for Docker to support Discord voice UDP
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
-- The runner uses a FIFO + headless Claude Code; messages arrive as JSON user prompts
+- The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session

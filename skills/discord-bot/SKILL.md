@@ -7,7 +7,7 @@ description: This skill should be used when the session is operating as a Discor
 
 ## Purpose
 
-Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. The MCP server runs as a Docker container via stdio transport. A runner script sends periodic poll prompts, and you call `discord_poll_messages` to receive incoming messages. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, and reading channel history.
+Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. The MCP server runs as a Docker container via stdio transport. A runner script sends periodic poll prompts via `claude -p --resume` (each poll is a separate invocation that resumes the same session), and you call `discord_poll_messages` to receive incoming messages. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, and reading channel history.
 
 ## Session Initialization
 

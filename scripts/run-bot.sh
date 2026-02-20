@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# run-bot.sh - Full claudebot lifecycle orchestrator
-# Starts Claude Code session (MCP server auto-starts via .mcp.json Docker stdio),
-# then polls for Discord messages by sending prompts to Claude Code.
+# run-bot.sh - Claudebot lifecycle orchestrator
+# Uses repeated `claude -p --resume` calls to maintain a persistent session
+# that polls Discord for messages via MCP tools.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,16 +15,18 @@ if [[ -f "${PLUGIN_DIR}/.env" ]]; then
 fi
 
 POLL_TIMEOUT="${CLAUDEBOT_POLL_TIMEOUT:-30}"
+MAX_CONSECUTIVE_FAILURES="${CLAUDEBOT_MAX_FAILURES:-5}"
+LOG_DIR="${PLUGIN_DIR}/logs"
+LOG_FILE="${LOG_DIR}/bot-$(date '+%Y%m%d').log"
+SESSION_FILE="${PLUGIN_DIR}/.bot-session-id"
 
-CLAUDE_PID=""
-
-log() { echo "[run-bot] $(date '+%H:%M:%S') $*" >&2; }
+log() { echo "[run-bot] $(date '+%H:%M:%S') $*" | tee -a "$LOG_FILE" >&2; }
 
 cleanup() {
   log "Shutting down..."
-  exec 3>&- 2>/dev/null
-  [[ -n "$CLAUDE_PID" ]] && kill "$CLAUDE_PID" 2>/dev/null && wait "$CLAUDE_PID" 2>/dev/null
-  [[ -n "${FIFO:-}" ]] && rm -f "$FIFO"
+  if [[ -f "$SESSION_FILE" ]]; then
+    log "Session ID preserved in ${SESSION_FILE} for restart recovery"
+  fi
   log "Shutdown complete."
 }
 trap cleanup EXIT INT TERM
@@ -37,43 +39,104 @@ for var in CLAUDEBOT_DISCORD_TOKEN CLAUDEBOT_DISCORD_GUILD_ID; do
   fi
 done
 
+if ! command -v claude &>/dev/null; then
+  log "ERROR: claude CLI is not installed"
+  exit 1
+fi
+
 if ! command -v docker &>/dev/null; then
   log "ERROR: docker is not installed"
   exit 1
 fi
 
+# Create log directory
+mkdir -p "$LOG_DIR"
+
 # --- Pre-pull Docker images ---
-log "Pulling go-scream image..."
+log "Pre-pulling go-scream image..."
 docker pull ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
 
-# --- Start Claude Code session ---
-# The MCP server starts automatically via .mcp.json (Docker stdio transport)
-log "Starting Claude Code session (MCP server will auto-start via Docker)..."
+# Pre-pull the MCP Docker image to avoid pull delay on each invocation
+log "Pre-pulling MCP Docker image..."
+docker pull ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 | tee -a "$LOG_FILE"
 
-# Create a FIFO for piping messages into Claude
-FIFO=$(mktemp -u /tmp/claudebot-fifo-XXXXXX)
-mkfifo "$FIFO"
+# --- Common claude flags ---
+CLAUDE_FLAGS=(
+  -p
+  --plugin-dir "$PLUGIN_DIR"
+  --mcp-config "$PLUGIN_DIR/.mcp.json"
+  --dangerously-skip-permissions
+  --output-format json
+)
 
-# Start Claude Code in headless mode reading from the FIFO
-claude --plugin-dir "$PLUGIN_DIR" --headless < "$FIFO" &
-CLAUDE_PID=$!
-log "Claude Code session started (PID: ${CLAUDE_PID})"
+# --- Initialize or resume session ---
+INIT_PROMPT="Session starting. Load the discord-bot skill and initialize. \
+Read .claude/claudebot.local.md for channel config and .claude/memory/personality.md \
+for current personality. Verify MCP connectivity by calling discord_get_guild."
 
-# Open the FIFO for writing (keep it open so Claude doesn't see EOF)
-exec 3>"$FIFO"
+SESSION_ID=""
 
-# Send initial prompt to load the skill and initialize
-echo '{"type":"system","content":"Session starting. Load the discord-bot skill and initialize."}' >&3
+# Check for existing session to resume
+if [[ -f "$SESSION_FILE" ]]; then
+  EXISTING_SESSION="$(cat "$SESSION_FILE")"
+  log "Found existing session: ${EXISTING_SESSION}, attempting resume..."
 
-# Give Claude Code time to start and initialize MCP connection
-sleep 5
+  if claude "${CLAUDE_FLAGS[@]}" --resume "$EXISTING_SESSION" \
+    "$INIT_PROMPT" >>"$LOG_FILE" 2>&1; then
+    SESSION_ID="$EXISTING_SESSION"
+    log "Resumed session: ${SESSION_ID}"
+  else
+    log "Failed to resume, starting fresh session"
+    rm -f "$SESSION_FILE"
+  fi
+fi
+
+if [[ -z "$SESSION_ID" ]]; then
+  SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  log "Creating new session: ${SESSION_ID}"
+
+  if ! claude "${CLAUDE_FLAGS[@]}" --session-id "$SESSION_ID" \
+    "$INIT_PROMPT" >>"$LOG_FILE" 2>&1; then
+    log "ERROR: Failed to initialize session"
+    exit 1
+  fi
+
+  log "Session initialized successfully"
+fi
+
+# Persist session ID for crash recovery
+echo "$SESSION_ID" > "$SESSION_FILE"
+log "Session ID saved to ${SESSION_FILE}"
 
 # --- Poll loop ---
 log "Starting message poll loop (interval: ${POLL_TIMEOUT}s)..."
 
-while kill -0 "$CLAUDE_PID" 2>/dev/null; do
-  echo '{"type":"poll","content":"Poll for new Discord messages using discord_poll_messages with timeout_seconds='"${POLL_TIMEOUT}"' and limit=10. Process any messages received."}' >&3
-  sleep "$POLL_TIMEOUT"
-done
+consecutive_failures=0
 
-log "Claude Code session exited."
+while true; do
+  POLL_PROMPT="Poll for new Discord messages using discord_poll_messages \
+with timeout_seconds=${POLL_TIMEOUT} and limit=10. Process any messages received."
+
+  if claude "${CLAUDE_FLAGS[@]}" --resume "$SESSION_ID" \
+    "$POLL_PROMPT" >>"$LOG_FILE" 2>&1; then
+    consecutive_failures=0
+  else
+    consecutive_failures=$((consecutive_failures + 1))
+    log "WARNING: Poll failed (consecutive: ${consecutive_failures}/${MAX_CONSECUTIVE_FAILURES})"
+
+    if [[ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]]; then
+      log "ERROR: Too many consecutive failures, exiting"
+      exit 1
+    fi
+
+    # Backoff: sleep for (failures * 5) seconds, capped at POLL_TIMEOUT
+    backoff=$((consecutive_failures * 5))
+    [[ $backoff -gt $POLL_TIMEOUT ]] && backoff=$POLL_TIMEOUT
+    log "Backing off for ${backoff}s..."
+    sleep "$backoff"
+    continue
+  fi
+
+  # Brief pause between polls
+  sleep 2
+done

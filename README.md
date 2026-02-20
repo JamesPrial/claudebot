@@ -6,8 +6,8 @@ A Claude Code plugin that turns a Claude Code session into a Discord bot brain w
 
 A runner script (`scripts/run-bot.sh`) orchestrates the full bot lifecycle:
 
-1. Launches a headless Claude Code session with this plugin loaded (the [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Docker container starts automatically via `.mcp.json`)
-2. Sends periodic poll prompts to Claude Code via a FIFO
+1. Pre-pulls the [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Docker image and initializes a Claude Code session with this plugin loaded
+2. Sends periodic poll prompts via `claude -p --resume`, maintaining conversation context across cycles
 3. Claude Code polls Discord for messages via MCP tools and processes them
 
 From there, agents take over — triaging each message, crafting personality-driven replies, running web searches, executing commands, and sending everything directly back to Discord via MCP tools.
@@ -59,6 +59,7 @@ From there, agents take over — triaging each message, crafting personality-dri
 | `CLAUDEBOT_DISCORD_TOKEN` | Yes | — | Discord bot token (prefix with `Bot `) |
 | `CLAUDEBOT_DISCORD_GUILD_ID` | Yes | — | Discord server ID |
 | `CLAUDEBOT_POLL_TIMEOUT` | No | `30` | Poll interval in seconds |
+| `CLAUDEBOT_MAX_FAILURES` | No | `5` | Max consecutive poll failures before exit |
 
 ## Configuration
 
@@ -98,7 +99,7 @@ default_channel:
 ### Message Pipeline
 
 ```
-Discord → MCP Server (Docker) ←stdio→ Claude Code Session ← FIFO ← Runner (poll prompts)
+Discord → MCP Server (Docker) ←stdio→ Claude Code (-p --resume) ← Runner (poll loop)
                                                     ↓
                                               Triage Agent (haiku)
                                              ↙    ↙     ↘      ↘
