@@ -10,7 +10,7 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 
 ```bash
 # Full lifecycle (starts Claude Code session with Docker MCP server, polls Discord)
-./scripts/run-bot.sh
+python3 ./scripts/run_bot.py
 ```
 
 **Prerequisites:** Docker installed and running.
@@ -41,7 +41,7 @@ Per-project settings live in `.claude/claudebot.local.md` (YAML frontmatter for 
 ## Architecture
 
 Messages flow through a pipeline:
-1. **Runner** (`scripts/run-bot.sh`) starts the MCP daemon container, then sends periodic poll prompts via `claude -p --resume`, maintaining a persistent session; Claude Code polls Discord via MCP tools over HTTP
+1. **Runner** (`scripts/run_bot.py`) starts the MCP daemon container, then sends periodic poll prompts via `claude -p --resume`, maintaining a persistent session; Claude Code polls Discord via MCP tools over HTTP
 2. **Triage agent** (haiku) evaluates every message: ignore, react, respond, or act — sends typing indicator when engaging
 3. **Downstream agent** handles the routed action:
    - `responder` (sonnet) — personality-driven replies
@@ -100,10 +100,12 @@ Structured key=value logging with level filtering across all components.
 - Per-component overrides take precedence over the global level
 
 **Two logging mechanisms:**
-- **Direct** (Bash-capable agents: executor, screamer, run-bot.sh): Source `scripts/log-lib.sh`, call `log_info`/`log_error`/`log_debug`/`log_warn`
+- **Direct** (Bash-capable agents: executor, screamer): Source `scripts/log-lib.sh`, call `log_info`/`log_error`/`log_debug`/`log_warn`
 - **Relay** (non-Bash agents: triage, responder, researcher, memory-manager, personality-evolver): Include `LOG:` section in agent output; the orchestrating session relays qualifying entries to the log file via Bash
 
-**Library:** `scripts/log-lib.sh` — sourceable bash library (~45 lines). Set `LOG_COMPONENT` before sourcing. Writes to stderr and appends to `logs/bot-YYYYMMDD.log` if `CLAUDEBOT_PLUGIN_DIR` is set.
+**Libraries:**
+- `scripts/log-lib.sh` — sourceable bash library for agents (~45 lines). Set `LOG_COMPONENT` before sourcing. Writes to stderr and appends to `logs/bot-YYYYMMDD.log` if `CLAUDEBOT_PLUGIN_DIR` is set.
+- `scripts/log_lib.py` — Python logging library used by `run_bot.py`. Same output format. Use `get_logger(component)` or CLI: `python3 log_lib.py <component> <level> <msg> [key=val ...]`
 
 ## Conventions
 
@@ -116,5 +118,5 @@ Structured key=value logging with level filtering across all components.
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
 - The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session
 - The MCP daemon container runs persistently to maintain Discord presence; the runner starts it on boot and stops it on exit
-- Env vars (`CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`) are passed to the MCP daemon container via Docker's `-e` flag in `run-bot.sh` — they must be exported in the shell environment, not just in `.env`
-- `CLAUDEBOT_PLUGIN_DIR` is exported by `run-bot.sh` — agents' Bash commands can use it to locate the plugin directory (e.g., for writing scream logs)
+- Env vars (`CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`) are passed to the MCP daemon container via Docker's `-e` flag in `run_bot.py` — they must be exported in the shell environment, not just in `.env`
+- `CLAUDEBOT_PLUGIN_DIR` is exported by `run_bot.py` — agents' Bash commands can use it to locate the plugin directory (e.g., for writing scream logs)
