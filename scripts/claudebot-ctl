@@ -2,6 +2,7 @@
 """CLI for managing claudebot systemd instances."""
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -24,10 +25,47 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
 
 
 def require_root(action: str) -> None:
-    import os
     if os.geteuid() != 0:
         print(f"Error: '{action}' requires root. Run with sudo.", file=sys.stderr)
         sys.exit(1)
+
+
+def find_claude_bin_dir() -> str | None:
+    """Find the directory containing the claude CLI binary."""
+    # Try current PATH (works if sudo preserves PATH or claude is in /usr/local/bin)
+    claude_path = shutil.which("claude")
+    if claude_path:
+        return str(Path(claude_path).resolve().parent)
+
+    # Try the invoking user's PATH (when running under sudo)
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        result = subprocess.run(
+            ["sudo", "-u", sudo_user, "bash", "-lc", "which claude"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return str(Path(result.stdout.strip()).resolve().parent)
+
+    # Check common locations
+    for candidate in [
+        Path.home() / ".claude" / "bin",
+        Path("/usr/local/bin"),
+    ]:
+        if (candidate / "claude").is_file():
+            return str(candidate)
+
+    if sudo_user:
+        home = Path(f"/home/{sudo_user}")
+        for candidate in [
+            home / ".claude" / "bin",
+            home / ".local" / "bin",
+            home / ".npm-global" / "bin",
+        ]:
+            if (candidate / "claude").is_file():
+                return str(candidate)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +74,13 @@ def require_root(action: str) -> None:
 
 def cmd_install(args: argparse.Namespace) -> None:
     require_root("install")
+
+    # Find claude CLI
+    claude_bin_dir = find_claude_bin_dir()
+    if not claude_bin_dir:
+        print("Warning: could not find 'claude' CLI binary.", file=sys.stderr)
+        print("The service may fail to start. Ensure claude is installed", file=sys.stderr)
+        print("and re-run 'claudebot-ctl install' to update the PATH.", file=sys.stderr)
 
     # Rewrite unit file paths based on actual install location
     unit_text = SOURCE_UNIT.read_text()
@@ -49,9 +94,22 @@ def cmd_install(args: argparse.Namespace) -> None:
         f"WorkingDirectory={PLUGIN_DIR}",
     )
 
+    # Inject claude CLI bin dir into the service PATH
+    default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if claude_bin_dir:
+        service_path = f"{claude_bin_dir}:{default_path}"
+    else:
+        service_path = default_path
+    unit_text = unit_text.replace(
+        f'Environment="PATH={default_path}"',
+        f'Environment="PATH={service_path}"',
+    )
+
     dest = SYSTEMD_DIR / UNIT_FILE
     dest.write_text(unit_text)
     print(f"Installed unit file to {dest}")
+    if claude_bin_dir:
+        print(f"  claude CLI found at: {claude_bin_dir}")
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)

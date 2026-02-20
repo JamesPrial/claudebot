@@ -7,6 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/claudebot/%i.env
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 WorkingDirectory=/opt/claudebot
 ExecStart=/usr/bin/python3 /opt/claudebot/scripts/run_bot.py --instance %i --env-file /etc/claudebot/%i.env
 Restart=on-failure
