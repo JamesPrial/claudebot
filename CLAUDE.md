@@ -15,12 +15,14 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 
 **Prerequisites:** Docker installed and running.
 
-Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`. See `.env.example` for all options.
+Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, useful for multi-instance setups). See `.env.example` for all options.
 
 The MCP server (`claudebot-mcp`) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online. The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
 
 **Operational files** (gitignored):
 - `logs/bot-YYYYMMDD.log` — Daily log files from the runner
+- `logs/mcp-YYYYMMDD.log` — MCP daemon container output (streamed continuously)
+- `logs/scream-YYYYMMDD.log` — go-scream invocation output (appended per scream)
 - `.bot-session-id` — Persisted session ID for crash recovery across restarts
 - `.mcp.runtime.json` — Generated at startup with the daemon's HTTP URL
 
@@ -96,3 +98,4 @@ All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_p
 - The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session
 - The MCP daemon container runs persistently to maintain Discord presence; the runner starts it on boot and stops it on exit
 - Env vars (`CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`) are passed to the MCP daemon container via Docker's `-e` flag in `run-bot.sh` — they must be exported in the shell environment, not just in `.env`
+- `CLAUDEBOT_PLUGIN_DIR` is exported by `run-bot.sh` — agents' Bash commands can use it to locate the plugin directory (e.g., for writing scream logs)
