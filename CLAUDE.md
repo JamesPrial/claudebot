@@ -17,14 +17,21 @@ Claudebot is a Claude Code **plugin** that turns a Claude Code session into a Di
 
 Required env vars (set in `.env` or export): `CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`. See `.env.example` for all options.
 
-The MCP server (`claudebot-mcp`) runs as a Docker container pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` via `.mcp.json` (stdio transport). The runner pre-pulls the image at startup, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
+The MCP server (`claudebot-mcp`) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online. The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
+
+**Operational files** (gitignored):
+- `logs/bot-YYYYMMDD.log` — Daily log files from the runner
+- `.bot-session-id` — Persisted session ID for crash recovery across restarts
+- `.mcp.runtime.json` — Generated at startup with the daemon's HTTP URL
 
 ## Setup & Config
 
 ```
-/claudebot:bot-setup              # Interactive setup wizard
-/claudebot:bot-setup show-status  # Check MCP connectivity
-/claudebot:bot-setup show-config  # Show current channel config
+/claudebot:bot-setup                   # Interactive setup wizard
+/claudebot:bot-setup show-status       # Check MCP connectivity
+/claudebot:bot-setup show-config       # Show current channel config
+/claudebot:bot-setup show-personality  # View personality state
+/claudebot:bot-setup reset-personality # Reset to blank personality
 ```
 
 Per-project settings live in `.claude/claudebot.local.md` (YAML frontmatter for channel tools/thresholds, markdown body for personality seed and instructions). Template at `templates/claudebot.local.md`.
@@ -32,7 +39,7 @@ Per-project settings live in `.claude/claudebot.local.md` (YAML frontmatter for 
 ## Architecture
 
 Messages flow through a pipeline:
-1. **Runner** (`scripts/run-bot.sh`) sends periodic poll prompts via `claude -p --resume`, maintaining a persistent session; Claude Code polls Discord via MCP tools
+1. **Runner** (`scripts/run-bot.sh`) starts the MCP daemon container, then sends periodic poll prompts via `claude -p --resume`, maintaining a persistent session; Claude Code polls Discord via MCP tools over HTTP
 2. **Triage agent** (haiku) evaluates every message: ignore, react, respond, or act — sends typing indicator when engaging
 3. **Downstream agent** handles the routed action:
    - `responder` (sonnet) — personality-driven replies
@@ -52,7 +59,7 @@ All agents send responses **directly to Discord via MCP tools** — they don't r
 | Agents | `agents/*.md` | triage, responder, researcher, executor, screamer, memory-manager, personality-evolver |
 | Hook | `hooks/hooks.json` | PreCompact prompt-based hook for memory preservation |
 | Command | `commands/bot-setup.md` | `/bot-setup` configuration wizard |
-| MCP config | `.mcp.json` | Docker stdio connection to claudebot-mcp |
+| MCP config | `.mcp.json` | HTTP connection to claudebot-mcp daemon |
 | Settings template | `templates/claudebot.local.md` | Per-project config template |
 | Memory templates | `templates/memory/*.md` | Initial blank memory files |
 | Reference docs | `skills/discord-bot/references/` | Memory schema and decision framework |
@@ -87,3 +94,5 @@ All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_p
 - The screamer agent uses `--network host` for Docker to support Discord voice UDP
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
 - The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session
+- The MCP daemon container runs persistently to maintain Discord presence; the runner starts it on boot and stops it on exit
+- Env vars (`CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`) are passed to the MCP daemon container via Docker's `-e` flag in `run-bot.sh` — they must be exported in the shell environment, not just in `.env`

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # run-bot.sh - Claudebot lifecycle orchestrator
-# Uses repeated `claude -p --resume` calls to maintain a persistent session
-# that polls Discord for messages via MCP tools.
+# Runs the MCP server as a persistent Docker daemon (HTTP transport) so the
+# Discord gateway stays open and the bot appears always-online. Uses repeated
+# `claude -p --resume` calls to maintain a persistent session across poll cycles.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +17,8 @@ fi
 
 POLL_TIMEOUT="${CLAUDEBOT_POLL_TIMEOUT:-30}"
 MAX_CONSECUTIVE_FAILURES="${CLAUDEBOT_MAX_FAILURES:-5}"
+MCP_PORT="${CLAUDEBOT_MCP_PORT:-8080}"
+MCP_CONTAINER="claudebot-mcp-daemon"
 LOG_DIR="${PLUGIN_DIR}/logs"
 LOG_FILE="${LOG_DIR}/bot-$(date '+%Y%m%d').log"
 SESSION_FILE="${PLUGIN_DIR}/.bot-session-id"
@@ -34,6 +37,10 @@ cleanup() {
   kill -- -$$ 2>/dev/null || true
   # Wait briefly for children to exit
   wait 2>/dev/null || true
+
+  log "Stopping MCP daemon container..."
+  docker stop -t 10 "$MCP_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$MCP_CONTAINER" >/dev/null 2>&1 || true
 
   if [[ -f "$SESSION_FILE" ]]; then
     log "Session ID preserved in ${SESSION_FILE} for restart recovery"
@@ -67,15 +74,70 @@ mkdir -p "$LOG_DIR"
 log "Pre-pulling go-scream image..."
 docker pull --platform linux/arm64 ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
 
-# Pre-pull the MCP Docker image to avoid pull delay on each invocation
 log "Pre-pulling MCP Docker image..."
 docker pull --platform linux/arm64 ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 | tee -a "$LOG_FILE"
+
+# --- Start MCP daemon container ---
+log "Starting MCP daemon on port ${MCP_PORT}..."
+docker rm -f "$MCP_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$MCP_CONTAINER" \
+  --platform linux/arm64 \
+  -p "${MCP_PORT}:8080" \
+  -e CLAUDEBOT_DISCORD_TOKEN \
+  -e CLAUDEBOT_DISCORD_GUILD_ID \
+  ghcr.io/jamesprial/claudebot-mcp:latest
+
+# Wait for container to be running
+log "Waiting for MCP container to start..."
+for i in $(seq 1 30); do
+  if docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
+    break
+  fi
+  if [[ $i -eq 30 ]]; then
+    log "ERROR: MCP container failed to start within 30s"
+    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 | tee -a "$LOG_FILE"
+    exit 1
+  fi
+  sleep 1
+done
+
+# Wait for Discord connection
+log "Waiting for Discord connection..."
+for i in $(seq 1 30); do
+  if docker logs "$MCP_CONTAINER" 2>&1 | grep -q "discord: connected as"; then
+    log "MCP daemon connected to Discord"
+    break
+  fi
+  if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
+    log "ERROR: MCP container exited unexpectedly"
+    docker logs "$MCP_CONTAINER" 2>&1 | tail -20 | tee -a "$LOG_FILE"
+    exit 1
+  fi
+  if [[ $i -eq 30 ]]; then
+    log "WARNING: Timed out waiting for Discord connection, proceeding anyway..."
+  fi
+  sleep 1
+done
+
+# --- Generate runtime .mcp.json ---
+RUNTIME_MCP_CONFIG="${PLUGIN_DIR}/.mcp.runtime.json"
+cat > "$RUNTIME_MCP_CONFIG" <<EOF
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "http://localhost:${MCP_PORT}/mcp"
+    }
+  }
+}
+EOF
+log "Generated runtime MCP config at ${RUNTIME_MCP_CONFIG}"
 
 # --- Common claude flags ---
 CLAUDE_FLAGS=(
   -p
   --plugin-dir "$PLUGIN_DIR"
-  --mcp-config "$PLUGIN_DIR/.mcp.json"
+  --mcp-config "$RUNTIME_MCP_CONFIG"
   --dangerously-skip-permissions
   --output-format json
 )
@@ -125,6 +187,12 @@ log "Starting message poll loop (interval: ${POLL_TIMEOUT}s)..."
 consecutive_failures=0
 
 while true; do
+  # Check that daemon is still running
+  if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
+    log "ERROR: MCP daemon container died, exiting"
+    exit 1
+  fi
+
   POLL_PROMPT="Poll for new Discord messages using discord_poll_messages \
 with timeout_seconds=${POLL_TIMEOUT} and limit=10. Process any messages received."
 
