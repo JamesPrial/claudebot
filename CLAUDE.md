@@ -38,6 +38,7 @@ Messages flow through a pipeline:
    - `responder` (sonnet) — personality-driven replies
    - `researcher` (sonnet) — web search, file lookups
    - `executor` (sonnet) — tool-based actions (Bash, file ops)
+   - `screamer` (sonnet) — voice channel screams via Docker
 4. **PreCompact hook** fires before context compression, dispatching `memory-manager` (opus) then `personality-evolver` (haiku)
 
 All agents send responses **directly to Discord via MCP tools** — they don't return text to be relayed.
@@ -48,7 +49,7 @@ All agents send responses **directly to Discord via MCP tools** — they don't r
 |-----------|----------|---------|
 | Plugin manifest | `.claude-plugin/plugin.json` | Plugin metadata |
 | Skill | `skills/discord-bot/SKILL.md` | Core behavior guide loaded every session |
-| Agents | `agents/*.md` | triage, responder, researcher, executor, memory-manager, personality-evolver |
+| Agents | `agents/*.md` | triage, responder, researcher, executor, screamer, memory-manager, personality-evolver |
 | Hook | `hooks/hooks.json` | PreCompact prompt-based hook for memory preservation |
 | Command | `commands/bot-setup.md` | `/bot-setup` configuration wizard |
 | MCP config | `.mcp.json` | Docker stdio connection to claudebot-mcp |
@@ -64,6 +65,14 @@ Memory files live in `.claude/memory/` in the project being botted (not this plu
 
 **Critical rule:** Memory files are updated ONLY during PreCompact (by memory-manager and personality-evolver agents), never during normal message processing. Agents READ memory for context but do NOT write to it mid-conversation.
 
+## Voice (go-scream)
+
+The bot can play synthetic screams in Discord voice channels via the `screamer` agent. go-scream runs as a Docker container (`ghcr.io/jamesprial/go-scream:latest`) invoked with `docker run --network host`. The bot token (`CLAUDEBOT_DISCORD_TOKEN`) is passed as `DISCORD_TOKEN` to the container. The guild ID comes from `CLAUDEBOT_DISCORD_GUILD_ID`. Voice channel IDs are resolved at runtime via `discord_get_channels`.
+
+Available presets: classic, whisper, death-metal, glitch, banshee, robot.
+
+`Scream` must be listed in the channel's tools configuration in `.claude/claudebot.local.md` for the triage agent to route scream requests.
+
 ## MCP Tools
 
 All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_poll_messages` (primary message intake), `discord_send_message` (with `reply_to` for threading), `discord_get_messages`, `discord_typing`, `discord_add_reaction`, `discord_edit_message`, `discord_get_channels`, `discord_get_guild`.
@@ -74,5 +83,7 @@ All tools prefixed with `mcp__plugin_claudebot_discord__`. Key tools: `discord_p
 - Personality evolves gradually — small trait additions per PreCompact cycle, never full rewrites
 - The triage agent runs for EVERY incoming message, even obvious ignores
 - Channel tool permissions from `.claude/claudebot.local.md` MUST be respected by executor
+- Voice screams are played via Docker (go-scream image), not by directly executing a binary
+- The screamer agent uses `--network host` for Docker to support Discord voice UDP
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
 - The runner uses a FIFO + headless Claude Code; messages arrive as JSON user prompts

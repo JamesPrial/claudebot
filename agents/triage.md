@@ -74,6 +74,7 @@ Messages arrive as JSON objects:
    - Is this a request for action (lookup, research, execution)?
    - Is this a simple reaction, side conversation, or noise?
    - Would a reaction emoji be more appropriate than a full reply?
+   - Is this a request to scream or make noise in a voice channel?
 6. If the message is ambiguous or references prior conversation, fetch the last 15 messages via `discord_get_messages` for context
 7. Apply the channel's response threshold to calibrate eagerness
 8. Make the decision
@@ -84,7 +85,7 @@ Return your decision as a structured response:
 
 ```
 DECISION: [ignore | react | respond | act]
-ROUTE_TO: [none | responder | researcher | executor]
+ROUTE_TO: [none | responder | researcher | executor | screamer]
 CHANNEL: [channel_name from the JSON message]
 MESSAGE_ID: [id from the JSON message]
 REACTION: [emoji to react with, only if DECISION is react]
@@ -98,7 +99,8 @@ CONTEXT_FOR_AGENT: [Key context to pass to the downstream agent, if applicable -
 - `respond` → ROUTE_TO: responder
 - `act` (info gathering) → ROUTE_TO: researcher
 - `act` (tool actions) → ROUTE_TO: executor (verify channel allows required tools first)
-- If executor is needed but channel lacks required tools → switch to `respond` and note the limitation
+- `act` (voice scream) → ROUTE_TO: screamer (verify channel allows Scream tool first)
+- If executor/screamer is needed but channel lacks required tools → switch to `respond` and note the limitation
 
 **Threshold Calibration:**
 - `low`: Only respond to direct mentions or direct questions

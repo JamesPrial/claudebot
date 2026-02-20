@@ -57,7 +57,7 @@ Every incoming Discord message follows this pipeline:
    - **ignore** - Take no action, wait for next message
    - **react** - Triage agent calls `discord_add_reaction` directly (lightweight engagement without a full reply)
    - **respond** - Dispatch `responder` agent to craft and send a personality-driven reply directly to Discord
-   - **act** - Dispatch `researcher` agent (info gathering) or `executor` agent (tool actions), which send results directly to Discord
+   - **act** - Dispatch `researcher` agent (info gathering), `executor` agent (tool actions), or `screamer` agent (voice screams), which send results directly to Discord
 4. **Direct I/O** - Agents send responses directly via `discord_send_message` with `reply_to` set to the original message ID. No text relay needed.
 
 ## MCP Capabilities
@@ -103,10 +103,35 @@ Call `discord_edit_message` with channel, message_id, and new content. Use for:
 ## Channel Configuration
 
 Read channel settings from `.claude/claudebot.local.md` YAML frontmatter. Each channel specifies:
-- `tools` - Which tools the executor agent may use in that channel
+- `tools` - Which tools the executor and screamer agents may use in that channel
 - `respond_threshold` - How eagerly to respond (`low`, `medium`, `high`)
 
 If a channel isn't configured, use `default_channel` settings. Pass the relevant channel config to the triage agent so it can factor in the response threshold.
+
+## Voice Capabilities
+
+The bot can play synthetic screams in Discord voice channels via the `screamer` agent. This uses go-scream, a Go CLI that runs as a Docker container (`ghcr.io/jamesprial/go-scream:latest`).
+
+### How It Works
+1. Triage detects a scream request and routes to the `screamer` agent
+2. Screamer resolves the voice channel name to an ID via `discord_get_channels`
+3. Screamer runs `docker run --network host` with the go-scream image
+4. go-scream joins the voice channel, plays the scream, and disconnects
+5. Screamer updates the status message in the text channel
+
+### Scream Presets
+- `classic` — Standard scream (3s)
+- `whisper` — Quiet, eerie scream (2s)
+- `death-metal` — Aggressive, heavy scream (4s)
+- `glitch` — Digital, chaotic scream (3s)
+- `banshee` — Wailing, high-pitched scream (4s)
+- `robot` — Mechanical, processed scream (3s)
+
+### Requirements
+- Docker must be installed and running
+- The `Scream` tool must be enabled in the channel's tool configuration
+- The bot's Discord token must have voice connect permissions
+- `--network host` is required for Discord voice UDP
 
 ## Personality System
 

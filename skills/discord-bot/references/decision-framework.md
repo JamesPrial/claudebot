@@ -100,6 +100,7 @@ Choose **act** when:
 **Sub-routing for act:**
 - **researcher** - When the action involves gathering information (web search, reading docs, checking files)
 - **executor** - When the action involves doing something (running commands, modifying files, executing scripts)
+- **screamer** - When the action involves voice channel screams (playing screams, listing presets, generating audio)
 
 **Tool permission check:** Before routing to executor, verify the requested action's tools are allowed in the channel's tool configuration. If not allowed, respond explaining the limitation instead.
 
@@ -116,6 +117,18 @@ Choose **act** when:
 
 [#general] @alice: @claudebot delete the temp files
 → Check channel tools: #general only has [WebSearch] → RESPOND with "I can't do file operations in #general, try asking in #dev"
+
+[#general] @alice: @claudebot scream in General
+→ ACT (screamer): Voice scream request - check channel allows Scream tool (send typing immediately)
+
+[#random] @bob: @claudebot do a death-metal scream in Gaming
+→ ACT (screamer): Voice scream with preset - check channel allows Scream tool
+
+[#dev] @charlie: @claudebot what scream presets do you have?
+→ ACT (screamer): Preset listing request - check channel allows Scream tool
+
+[#random] @alice: AAAAAAAAAA
+→ At high threshold with a playful personality: Consider REACT with 😱 or ACT (screamer) if personality has absorbed chaotic traits
 ```
 
 ## Personality Influence on Decisions

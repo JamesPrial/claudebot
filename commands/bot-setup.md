@@ -37,7 +37,7 @@ Run the interactive setup:
 3. **Create memory directory**: If `.claude/memory/` doesn't exist, create it and copy all template files from the plugin's `templates/memory/` directory.
 
 4. **Configure channels**: Ask the user which Discord channels the bot will operate in (pre-populated from discovery if available). For each channel, ask:
-   - What tools should be available? (Options: WebSearch, Read, Bash, Glob, Grep, Write, Edit)
+   - What tools should be available? (Options: WebSearch, Read, Bash, Glob, Grep, Write, Edit, Scream)
    - What response threshold? (low/medium/high)
 
 5. **Set bot name**: Ask the user for a bot name (default: "claudebot")

@@ -42,6 +42,10 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
+# --- Pre-pull Docker images ---
+log "Pulling go-scream image..."
+docker pull ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
+
 # --- Start Claude Code session ---
 # The MCP server starts automatically via .mcp.json (Docker stdio transport)
 log "Starting Claude Code session (MCP server will auto-start via Docker)..."

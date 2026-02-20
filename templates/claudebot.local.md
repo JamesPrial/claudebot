@@ -1,13 +1,13 @@
 ---
 channels:
   general:
-    tools: [WebSearch]
+    tools: [WebSearch, Scream]
     respond_threshold: medium
   dev:
     tools: [WebSearch, Read, Bash, Glob, Grep]
     respond_threshold: high
   random:
-    tools: [WebSearch]
+    tools: [WebSearch, Scream]
     respond_threshold: low
 default_channel:
   tools: [WebSearch]

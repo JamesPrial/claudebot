@@ -18,6 +18,7 @@ From there, agents take over — triaging each message, crafting personality-dri
 - **Direct Discord I/O** — Agents send messages, add reactions, and show typing indicators via MCP tools
 - **Personality system** — Starts blank, evolves organically by absorbing traits from chat participants
 - **Persistent memory** — Full context graph (users, topics, relationships) survives context compaction
+- **Voice screams** — Play synthetic screams in voice channels via go-scream Docker integration (6 presets)
 - **Per-channel configuration** — Different channels get different tool permissions and response thresholds
 
 ## Setup
@@ -70,7 +71,7 @@ YAML frontmatter defines per-channel tool permissions and response thresholds:
 ```yaml
 channels:
   general:
-    tools: [WebSearch]
+    tools: [WebSearch, Scream]
     respond_threshold: medium
   dev:
     tools: [WebSearch, Read, Bash, Glob, Grep]
@@ -101,11 +102,11 @@ Discord → MCP Server (Docker) ←stdio→ Claude Code Session ← FIFO ← Run
                                                     ↓
                                               Triage Agent (haiku)
                                              ↙    ↙     ↘      ↘
-                                        ignore  react  respond   act
-                                                  ↓       ↓     ↙  ↘
-                                               emoji  responder researcher executor
-                                                         ↓         ↓         ↓
-                                                    discord_send_message (via MCP)
+                                        ignore  react  respond      act
+                                                  ↓       ↓     ↙    |    ↘
+                                               emoji  responder researcher executor screamer
+                                                         ↓         ↓         ↓        ↓
+                                                    discord_send_message (via MCP)  docker run
 ```
 
 ### Agents
@@ -116,6 +117,7 @@ Discord → MCP Server (Docker) ←stdio→ Claude Code Session ← FIFO ← Run
 | responder | sonnet | Crafts personality-driven replies |
 | researcher | sonnet | Web search, file lookups, information gathering |
 | executor | sonnet | Tool-based actions (Bash, file ops) with safety checks |
+| screamer | sonnet | Voice channel screams via go-scream Docker container |
 | memory-manager | opus | Saves context graph during PreCompact |
 | personality-evolver | haiku | Absorbs one user trait per compaction cycle |
 
