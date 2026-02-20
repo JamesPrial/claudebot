@@ -154,8 +154,8 @@ if [[ -f "$SESSION_FILE" ]]; then
   EXISTING_SESSION="$(cat "$SESSION_FILE")"
   log "Found existing session: ${EXISTING_SESSION}, attempting resume..."
 
-  if claude "${CLAUDE_FLAGS[@]}" --resume "$EXISTING_SESSION" \
-    "$INIT_PROMPT" >>"$LOG_FILE" 2>&1; then
+  if timeout 180 claude "${CLAUDE_FLAGS[@]}" --resume "$EXISTING_SESSION" \
+    "$INIT_PROMPT" < /dev/null >>"$LOG_FILE" 2>&1; then
     SESSION_ID="$EXISTING_SESSION"
     log "Resumed session: ${SESSION_ID}"
   else
@@ -168,8 +168,8 @@ if [[ -z "$SESSION_ID" ]]; then
   SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   log "Creating new session: ${SESSION_ID}"
 
-  if ! claude "${CLAUDE_FLAGS[@]}" --session-id "$SESSION_ID" \
-    "$INIT_PROMPT" >>"$LOG_FILE" 2>&1; then
+  if ! timeout 180 claude "${CLAUDE_FLAGS[@]}" --session-id "$SESSION_ID" \
+    "$INIT_PROMPT" < /dev/null >>"$LOG_FILE" 2>&1; then
     log "ERROR: Failed to initialize session"
     exit 1
   fi
@@ -196,8 +196,8 @@ while true; do
   POLL_PROMPT="Poll for new Discord messages using discord_poll_messages \
 with timeout_seconds=${POLL_TIMEOUT} and limit=10. Process any messages received."
 
-  if claude "${CLAUDE_FLAGS[@]}" --resume "$SESSION_ID" \
-    "$POLL_PROMPT" >>"$LOG_FILE" 2>&1; then
+  if timeout 120 claude "${CLAUDE_FLAGS[@]}" --resume "$SESSION_ID" \
+    "$POLL_PROMPT" < /dev/null >>"$LOG_FILE" 2>&1; then
     consecutive_failures=0
   else
     consecutive_failures=$((consecutive_failures + 1))
