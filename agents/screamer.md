@@ -75,7 +75,7 @@ Save the returned message ID for later editing.
 
 ### Step 4: Build and run the Docker command
 ```bash
-docker run --rm --network host \
+docker run --rm --network host --platform linux/arm64 \
   -e DISCORD_TOKEN="$CLAUDEBOT_DISCORD_TOKEN" \
   ghcr.io/jamesprial/go-scream:latest \
   play [--preset <preset>] [--duration <duration>] [--volume <volume>] \
@@ -102,7 +102,7 @@ Key details:
 When a user requests a scream audio file instead of voice playback:
 
 ```bash
-docker run --rm \
+docker run --rm --platform linux/arm64 \
   -v /tmp/scream-output:/output \
   ghcr.io/jamesprial/go-scream:latest \
   generate --output /output/scream.ogg [--preset <preset>] [--duration <duration>] [--volume <volume>] [--format <ogg|wav>]

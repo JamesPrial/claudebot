@@ -22,8 +22,19 @@ SESSION_FILE="${PLUGIN_DIR}/.bot-session-id"
 
 log() { echo "[run-bot] $(date '+%H:%M:%S') $*" | tee -a "$LOG_FILE" >&2; }
 
+SHUTTING_DOWN=false
+
 cleanup() {
-  log "Shutting down..."
+  # Guard against re-entry from EXIT after INT/TERM
+  $SHUTTING_DOWN && return
+  SHUTTING_DOWN=true
+
+  log "Shutting down — killing child processes..."
+  # Kill all processes in this process group (claude, docker, sleep)
+  kill -- -$$ 2>/dev/null || true
+  # Wait briefly for children to exit
+  wait 2>/dev/null || true
+
   if [[ -f "$SESSION_FILE" ]]; then
     log "Session ID preserved in ${SESSION_FILE} for restart recovery"
   fi
@@ -54,11 +65,11 @@ mkdir -p "$LOG_DIR"
 
 # --- Pre-pull Docker images ---
 log "Pre-pulling go-scream image..."
-docker pull ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
+docker pull --platform linux/arm64 ghcr.io/jamesprial/go-scream:latest || log "WARNING: Failed to pull go-scream image (voice screams may not work)"
 
 # Pre-pull the MCP Docker image to avoid pull delay on each invocation
 log "Pre-pulling MCP Docker image..."
-docker pull ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 | tee -a "$LOG_FILE"
+docker pull --platform linux/arm64 ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 | tee -a "$LOG_FILE"
 
 # --- Common claude flags ---
 CLAUDE_FLAGS=(

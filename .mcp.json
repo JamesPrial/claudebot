@@ -4,7 +4,7 @@
       "type": "stdio",
       "command": "docker",
       "args": [
-        "run", "--rm", "-i",
+        "run", "--rm", "-i", "--platform", "linux/arm64",
         "-e", "CLAUDEBOT_DISCORD_TOKEN",
         "-e", "CLAUDEBOT_DISCORD_GUILD_ID",
         "ghcr.io/jamesprial/claudebot-mcp:latest",
