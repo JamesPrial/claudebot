@@ -6,3 +6,7 @@ node_modules/
 logs/
 .bot-session-id
 .mcp.runtime.json
+.mcp.runtime-*.json
+.bot-session-*.id
+.claudebot-*.pid
+.worktrees/
