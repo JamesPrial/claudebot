@@ -23,8 +23,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_DIR = SCRIPT_DIR.parent
 
-# Import the logging library from the same directory
+# Import libraries from the same directory
 sys.path.insert(0, str(SCRIPT_DIR))
+from docker_group import ensure_docker_group
 from log_lib import get_logger
 
 
@@ -416,6 +417,8 @@ def poll_loop(session_id: str, claude_flags: list[str], poll_timeout: int,
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    ensure_docker_group()
+
     args = parse_args()
     instance = args.instance
 

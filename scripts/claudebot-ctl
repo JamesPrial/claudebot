@@ -20,6 +20,9 @@ PLUGIN_DIR = SCRIPT_DIR.parent
 EXAMPLE_ENV = PLUGIN_DIR / "configs" / "example.env"
 INSTANCES_DIR = PLUGIN_DIR / "instances"
 
+sys.path.insert(0, str(SCRIPT_DIR))
+from docker_group import ensure_docker_group
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -359,6 +362,9 @@ def cmd_clean(args: argparse.Namespace) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+_DOCKER_COMMANDS = {"start", "stop", "restart", "clean"}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="claudebot-ctl",
@@ -386,6 +392,9 @@ def main() -> None:
     p.add_argument("instance", help="Instance name")
 
     args = parser.parse_args()
+
+    if args.command in _DOCKER_COMMANDS:
+        ensure_docker_group()
 
     commands = {
         "init": cmd_init,
