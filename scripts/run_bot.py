@@ -81,9 +81,11 @@ def ensure_auth_token(env_file: Path | None, log) -> str:
     lines = original.splitlines()
     replaced = False
     new_lines: list[str] = []
+    # Match `CLAUDEBOT_AUTH_TOKEN=...` and `export CLAUDEBOT_AUTH_TOKEN=...`
+    # with arbitrary leading/interior whitespace.
+    auth_line_re = re.compile(r"^\s*(?:export\s+)?CLAUDEBOT_AUTH_TOKEN\s*=")
     for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("CLAUDEBOT_AUTH_TOKEN="):
+        if auth_line_re.match(line):
             new_lines.append(f"CLAUDEBOT_AUTH_TOKEN={token}")
             replaced = True
         else:
@@ -98,11 +100,23 @@ def ensure_auth_token(env_file: Path | None, log) -> str:
     if original.endswith("\n") or not original:
         new_content += "\n"
 
+    # Write atomically: write to a tmp file with 0600, then rename over the
+    # target. Tighten perms on the final path too in case it pre-existed with
+    # looser perms (replace preserves the source file's mode, but be defensive).
+    tmp_path = env_file.with_suffix(env_file.suffix + ".tmp")
     try:
-        env_file.write_text(new_content)
+        tmp_path.write_text(new_content)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, env_file)  # atomic on POSIX
+        os.chmod(env_file, 0o600)
         log.info("Persisted auth token to env file", f"path={env_file}")
     except OSError as exc:
         log.warn("Could not write env file", f"path={env_file}", f"err={exc}")
+        # Best-effort cleanup of stray tmp file
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
     return token
 
@@ -207,11 +221,22 @@ class BotLifecycle:
 # Preflight
 # ---------------------------------------------------------------------------
 
-def preflight_checks(log) -> None:
-    for var in ("CLAUDEBOT_DISCORD_TOKEN", "CLAUDEBOT_DISCORD_GUILD_ID"):
-        if not os.environ.get(var):
-            log.error("Required env var is not set", f"var={var}")
-            sys.exit(1)
+def preflight_checks(log, env_file: Path | None = None) -> None:
+    missing = [
+        var for var in ("CLAUDEBOT_DISCORD_TOKEN", "CLAUDEBOT_DISCORD_GUILD_ID")
+        if not os.environ.get(var)
+    ]
+    if missing:
+        hint = (
+            f"set them in {env_file}" if env_file is not None
+            else "set them in your shell environment or a .env file in the plugin directory"
+        )
+        log.error(
+            "Required env var(s) not set — bot cannot start",
+            f"missing={','.join(missing)}",
+            f"hint={hint}",
+        )
+        sys.exit(1)
 
     if not shutil.which("claude"):
         log.error("claude CLI is not installed")
@@ -338,6 +363,11 @@ def start_mcp_daemon(mcp_port: int, container_name: str, auth_token: str, log) -
         # 000 means connection refused / not yet listening.
         if code and code != "000":
             log.info("MCP HTTP transport is ready", f"probe_status={code}")
+            if code == "401":
+                log.warn(
+                    "MCP returned 401 — possible token mismatch between env "
+                    "file and running container (e.g. env restored from backup)"
+                )
             http_ready = True
             break
 
@@ -396,6 +426,12 @@ def generate_mcp_config(mcp_port: int, auth_token: str, config_path: Path, log) 
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
         f.write("\n")
+    # File embeds a bearer token — restrict to owner-only.
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError as exc:
+        log.warn("Could not tighten perms on runtime MCP config",
+                 f"path={config_path}", f"err={exc}")
     log.info("Generated runtime MCP config", f"path={config_path}")
     return config_path
 
@@ -549,7 +585,7 @@ def main() -> None:
     pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
 
     # Preflight
-    preflight_checks(log)
+    preflight_checks(log, primary_env_file)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure we have a CLAUDEBOT_AUTH_TOKEN for the discord-mcp daemon.

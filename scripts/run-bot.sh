@@ -67,12 +67,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Preflight checks ---
+missing_vars=()
 for var in CLAUDEBOT_DISCORD_TOKEN CLAUDEBOT_DISCORD_GUILD_ID; do
   if [[ -z "${!var:-}" ]]; then
-    log_error "Required env var is not set" "var=${var}"
-    exit 1
+    missing_vars+=("$var")
   fi
 done
+if [[ ${#missing_vars[@]} -gt 0 ]]; then
+  log_error "Required env var(s) not set — bot cannot start" \
+    "missing=${missing_vars[*]}" "hint=set them in ${ENV_FILE}"
+  exit 1
+fi
 
 if ! command -v claude &>/dev/null; then
   log_error "claude CLI is not installed"
@@ -98,11 +103,21 @@ if [[ -z "${CLAUDEBOT_AUTH_TOKEN:-}" ]]; then
   export CLAUDEBOT_AUTH_TOKEN
   log_info "Generated new CLAUDEBOT_AUTH_TOKEN for MCP daemon"
   if [[ -f "$ENV_FILE" ]]; then
-    # Strip any existing entry, then append the new one.
+    # Strip any existing entry (both `KEY=` and `export KEY=` forms), then
+    # append the new one. Don't mask grep I/O errors with `|| true`: exit 1
+    # means "no matches" (fine), anything else is a real failure.
     tmp_env="$(mktemp)"
-    grep -v '^CLAUDEBOT_AUTH_TOKEN=' "$ENV_FILE" > "$tmp_env" || true
+    if ! grep -Ev '^[[:space:]]*(export[[:space:]]+)?CLAUDEBOT_AUTH_TOKEN[[:space:]]*=' "$ENV_FILE" > "$tmp_env"; then
+      rc=$?
+      if [[ "$rc" -ne 1 ]]; then
+        log_error "Failed to read env file while updating auth token" "rc=${rc}" "path=${ENV_FILE}"
+        rm -f "$tmp_env"
+        exit "$rc"
+      fi
+    fi
     printf '\nCLAUDEBOT_AUTH_TOKEN=%s\n' "$CLAUDEBOT_AUTH_TOKEN" >> "$tmp_env"
     mv "$tmp_env" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
     log_info "Persisted auth token to env file" "path=${ENV_FILE}"
   else
     log_warn "No .env file present; generated auth token will not persist across restarts"
@@ -167,6 +182,9 @@ for i in $(seq 1 30); do
     "http://localhost:${MCP_PORT}/mcp" || echo "000")"
   if [[ -n "$code" && "$code" != "000" ]]; then
     log_info "MCP HTTP transport is ready" "probe_status=${code}"
+    if [[ "$code" == "401" ]]; then
+      log_warn "MCP returned 401 — possible token mismatch between env file and running container (e.g. env restored from backup)"
+    fi
     http_ready=true
     break
   fi
@@ -205,6 +223,8 @@ cat > "$RUNTIME_MCP_CONFIG" <<EOF
   }
 }
 EOF
+# File embeds a bearer token — restrict to owner-only.
+chmod 600 "$RUNTIME_MCP_CONFIG"
 log_info "Generated runtime MCP config" "path=${RUNTIME_MCP_CONFIG}"
 
 # --- Common claude flags ---
