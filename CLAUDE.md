@@ -26,7 +26,7 @@ claudebot-ctl stop main              # Graceful shutdown
 
 Required env vars (set in `instances/<name>.env` or `.env`): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, must be unique per instance), `CLAUDEBOT_AUTH_TOKEN` (bearer token for the discord-mcp HTTP daemon; leave blank and the runner auto-generates one on first start and persists it back to the env file), `CLAUDEBOT_DOCKER_PLATFORM` (omit for auto-detect). See `configs/example.env` for all options.
 
-The MCP server (discord-mcp) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/discord-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online and providing both message tools (`discord_*`) and voice-playback tools (`voice_*`). The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles. The container is named `claudebot-mcp-{instance}` for management purposes.
+The MCP server (discord-mcp) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/discord-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online and providing both message tools (`discord_*`) and voice-playback tools (`voice_*`). The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles. The container is named `claudebot-mcp-{instance}` for management purposes. Note: `claudebot-mcp` now refers only to the local container name; the image is `ghcr.io/jamesprial/discord-mcp:latest`.
 
 **Operational files** (gitignored, `{instance}` defaults to `default`):
 - `logs/{instance}/bot-YYYYMMDD.log` — Daily log files from the runner
@@ -85,7 +85,7 @@ Memory files live in `.claude/memory/` in the project being botted (not this plu
 
 **Critical rule:** Memory files are updated ONLY during PreCompact (by memory-manager and personality-evolver agents), never during normal message processing. Agents READ memory for context but do NOT write to it mid-conversation.
 
-## Voice (discord-mcp playback)
+## Voice Playback
 
 Voice playback runs through the same discord-mcp daemon as the message tools — there is no separate Docker invocation per scream and no fixed preset library. The `screamer` agent picks an arbitrary audio source (a user-supplied URL or a public-domain / permissively-licensed clip) and pushes it through discord-mcp's `voice_*` MCP tools.
 
@@ -149,7 +149,7 @@ claudebot-ctl start main             # Start as detached background process
 - Personality evolves gradually — small trait additions per PreCompact cycle, never full rewrites
 - The triage agent runs for EVERY incoming message, even obvious ignores
 - Channel tool permissions from `.claude/claudebot.local.md` MUST be respected by executor
-- Voice playback runs through discord-mcp's `voice_*` MCP tools (no per-scream Docker invocation, no fixed preset library)
+- Voice playback uses the persistent discord-mcp daemon's `voice_*` tools; any audio source playable by ffmpeg works
 - The screamer agent must only play public-domain / CC0 / permissively-licensed sources — never copyrighted music
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
 - The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session
