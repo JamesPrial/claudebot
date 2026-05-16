@@ -58,10 +58,11 @@ Call `discord_typing` on the text channel where the request came from.
 
 ### Step 2: Resolve the voice channel
 Call `voice_channel_list` (returns voice/stage channels in the guild with id, name, member count, etc.). Pick the target:
-- **Explicit name** in the request → case-insensitive partial match against the channel list
-- **"the same one I'm in"** / no channel specified → pick the most populated voice channel (highest member count); if all are empty, ask which to join
-- **Multiple matches** → list the matches in a reply and ask the user to be specific
-- **No voice channels exist** → reply saying so via `discord_send_message` and stop
+- **User named a channel by name or ID** → honor that, even if the user is sitting in a different channel. Case-insensitive partial match against the channel list.
+- **User did NOT name a channel** → join the channel the requesting user is currently in. If the user isn't in voice, pick the most populated voice channel. If no voice channel has any members, decline ("nobody's in voice — give me a channel?") and stop.
+- **Multiple channels share the exact same name** → prefer the one with members; if still tied, list the matches in a reply and ask the user to clarify.
+- **Multiple fuzzy matches** → list the matches in a reply and ask the user to be specific.
+- **No voice channels exist** → reply saying so via `discord_send_message` and stop.
 
 ### Step 3: Pick an audio source
 You have wide latitude — the spec is "make some noise," not "play a specific file." Choose ONE `source` string for `voice_play`. It can be an http(s):// URL or a local file path. ffmpeg decodes the format, so MP3 / OGG / OPUS / WAV / FLAC / M4A all work.
@@ -69,9 +70,9 @@ You have wide latitude — the spec is "make some noise," not "play a specific f
 **Source priority:**
 1. **A URL provided in the user's message** — use it directly, no second-guessing.
 2. **A public-domain / permissively-licensed clip you can recall or confidently construct** that matches the requested vibe. Good source strategies (search these mentally, do not invent specific URLs that may 404):
-   - **Wikimedia Commons** for stock screams, animal cries, public-domain SFX (e.g., the Wilhelm scream lives here)
+   - **Wikimedia Commons** for stock screams, animal cries, public-domain SFX (e.g., search Wikimedia Commons for "Wilhelm scream" rather than guessing the URL)
    - **archive.org** audio collection for old radio, public-domain creature/horror clips, ambient noise
-   - **freesound.org** for CC0-tagged horror/scream/SFX assets (note: hotlinking requires their direct download URL pattern)
+   - **freesound.org** direct URLs generally require auth and are usually NOT usable as a `voice_play` source — prefer Wikimedia or archive.org instead
    - **soundjay.com** free section for short generic SFX
 3. **A local file path** if one is clearly available in the project (rare — only use if the user references one).
 
@@ -91,9 +92,17 @@ Send a brief `discord_send_message` with `reply_to` = original message id:
 Capture the returned message id if you want to update it later (optional — a follow-up reply works fine too).
 
 ### Step 5: Join, play, monitor, leave
-1. `voice_join` with `channel` = the resolved channel id (or name)
-2. `voice_play` with `source` = your chosen URL/path and `label` = a short human description (e.g., `"wilhelm scream"`, `"banshee wail"`)
-3. Optionally poll `voice_playback_status` once or twice to confirm playback started and to know when the queue empties. `voice_play` returns when the item is queued, not when it finishes — short clips usually finish within seconds.
+
+**Before joining** — the voice connection is single-channel. Call `voice_playback_status` first:
+- If not connected → proceed to `voice_join`.
+- If connected to a DIFFERENT channel → `voice_leave`, then `voice_join` the target.
+- If connected to the SAME channel → skip `voice_join`, go straight to `voice_play`.
+- If something is already playing → default to `voice_stop_playback` (interrupt), then play. Only wait/queue if the user's request implies "add to queue" or "after this one finishes".
+
+Then:
+1. `voice_join` with `channel` = the resolved channel id (or name), unless skipped above.
+2. `voice_play` with `source` = your chosen URL/path and `label` = a short human description (e.g., `"wilhelm scream"`, `"banshee wail"`).
+3. `voice_play` returns when the item is queued, not when it finishes. You don't have `sleep` — if you want to confirm progress, call `voice_playback_status` again after composing your status reply rather than tight-looping.
 4. `voice_leave` once the queue is empty. (If the user asked for a sustained / repeated thing, you may stay and queue more — use judgment.)
 
 If `voice_join` or `voice_play` returns an error, capture the error text. Common failures:
@@ -101,6 +110,7 @@ If `voice_join` or `voice_play` returns an error, capture the error text. Common
 - Source URL 404s or returns non-audio content
 - ffmpeg can't decode the source
 - Already-in-progress playback (if so, `voice_stop_playback` then retry)
+- `voice_join` hangs or times out — if no connection within ~10s OR if two successive `voice_playback_status` checks show no progress, bail with `voice_leave` and send a failure status.
 
 ### Step 6: Final report
 Send a `discord_send_message` reply summarizing the outcome:
