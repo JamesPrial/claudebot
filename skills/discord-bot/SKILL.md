@@ -7,7 +7,7 @@ description: This skill should be used when the session is operating as a Discor
 
 ## Purpose
 
-Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. The MCP server runs as a Docker container via stdio transport. A runner script sends periodic poll prompts via `claude -p --resume` (each poll is a separate invocation that resumes the same session), and you call `discord_poll_messages` to receive incoming messages. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, and reading channel history.
+Provide the decision-making framework for operating as a Discord bot brain with direct Discord I/O via MCP tools. The MCP server is `discord-mcp`, running as a persistent Docker container with HTTP transport on port 8080 (bearer-authenticated). A runner script sends periodic poll prompts via `claude -p --resume` (each poll is a separate invocation that resumes the same session), and you call `discord_poll_messages` to receive incoming messages. Agents evaluate each message, route it appropriately, and interact with Discord directly — sending messages, adding reactions, showing typing indicators, reading channel history, and playing voice audio.
 
 ## Session Initialization
 
@@ -110,28 +110,19 @@ If a channel isn't configured, use `default_channel` settings. Pass the relevant
 
 ## Voice Capabilities
 
-The bot can play synthetic screams in Discord voice channels via the `screamer` agent. This uses go-scream, a Go CLI that runs as a Docker container (`ghcr.io/jamesprial/go-scream:latest`).
+The bot can join Discord voice channels and play arbitrary audio (screams, sound effects, clips, ambient noise) via the `screamer` agent. Voice playback is handled by the `voice_*` MCP tools exposed by the same `discord` MCP server that provides the message tools — no separate container, no per-scream Docker invocation.
 
 ### How It Works
-1. Triage detects a scream request and routes to the `screamer` agent
-2. Screamer resolves the voice channel name to an ID via `discord_get_channels`
-3. Screamer runs `docker run --network host` with the go-scream image
-4. go-scream joins the voice channel, plays the scream, and disconnects
-5. Screamer updates the status message in the text channel
-
-### Scream Presets
-- `classic` — Standard scream (3s)
-- `whisper` — Quiet, eerie scream (2s)
-- `death-metal` — Aggressive, heavy scream (4s)
-- `glitch` — Digital, chaotic scream (3s)
-- `banshee` — Wailing, high-pitched scream (4s)
-- `robot` — Mechanical, processed scream (3s)
+1. Triage detects a voice-playback request and routes to the `screamer` agent
+2. Screamer enumerates voice/stage channels via `voice_channel_list` and picks the target
+3. Screamer chooses ONE audio source (a user-supplied URL, or a public-domain / permissively-licensed clip matching the requested vibe)
+4. Screamer calls `voice_join`, then `voice_play` (ffmpeg decodes the source), monitors via `voice_playback_status`, and finishes with `voice_leave`
+5. Screamer sends a status reply in the original text channel via `discord_send_message`
 
 ### Requirements
-- Docker must be installed and running
-- The `Scream` tool must be enabled in the channel's tool configuration
-- The bot's Discord token must have voice connect permissions
-- `--network host` is required for Discord voice UDP
+- The `Scream` tool must be enabled in the channel's tool configuration (it's the permission gate for any voice playback, not just literal screams)
+- The bot's Discord identity must have Connect and Speak permissions on the target voice channel
+- Audio source must be public domain, CC0, or permissively-licensed — no copyrighted music, song clips, or commercial media
 
 ## Personality System
 
@@ -187,9 +178,9 @@ Claudebot uses structured key=value logging with level filtering (DEBUG, INFO, W
 
 ### Logging Mechanisms
 
-**Direct logging** (agents with Bash tool — executor, screamer): These agents source `log-lib.sh` and call `log_info`/`log_error`/`log_debug` directly. No relay needed.
+**Direct logging** (agents with Bash tool — executor): These agents source `log-lib.sh` and call `log_info`/`log_error`/`log_debug` directly. No relay needed.
 
-**Relay logging** (agents without Bash — triage, responder, researcher, memory-manager, personality-evolver): These agents include a `LOG:` section in their output. After an agent returns, relay qualifying entries to the log file:
+**Relay logging** (agents without Bash — triage, responder, researcher, screamer, memory-manager, personality-evolver): These agents include a `LOG:` section in their output. After an agent returns, relay qualifying entries to the log file:
 
 ```bash
 # After agent completes, if output contains LOG: lines:

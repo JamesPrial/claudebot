@@ -1,4 +1,8 @@
 ---
+# Per-channel tool permissions and response thresholds.
+# `Scream` means "may use voice playback" — enabling it allows the screamer
+# agent to join voice in this channel and play any audio source (URL or file).
+# It's no longer tied to a fixed set of presets; the screamer picks the clip.
 channels:
   general:
     tools: [WebSearch, Scream]

@@ -6,7 +6,7 @@ A Claude Code plugin that turns a Claude Code session into a Discord bot brain w
 
 A runner script (`scripts/run-bot.sh`) orchestrates the full bot lifecycle:
 
-1. Pre-pulls the [`claudebot-mcp`](https://github.com/jamesprial/claudebot-mcp) Docker image and initializes a Claude Code session with this plugin loaded
+1. Pre-pulls the [`discord-mcp`](https://github.com/jamesprial/discord-mcp) Docker image and initializes a Claude Code session with this plugin loaded
 2. Sends periodic poll prompts via `claude -p --resume`, maintaining conversation context across cycles
 3. Claude Code polls Discord for messages via MCP tools and processes them
 
@@ -18,7 +18,7 @@ From there, agents take over — triaging each message, crafting personality-dri
 - **Direct Discord I/O** — Agents send messages, add reactions, and show typing indicators via MCP tools
 - **Personality system** — Starts blank, evolves organically by absorbing traits from chat participants
 - **Persistent memory** — Full context graph (users, topics, relationships) survives context compaction
-- **Voice screams** — Play synthetic screams in voice channels via go-scream Docker integration (6 presets)
+- **Voice playback** — Join voice channels and play arbitrary audio sources (URLs or files) via discord-mcp's `voice_*` tools
 - **Per-channel configuration** — Different channels get different tool permissions and response thresholds
 
 ## Setup
@@ -99,15 +99,15 @@ default_channel:
 ### Message Pipeline
 
 ```
-Discord → MCP Server (Docker) ←stdio→ Claude Code (-p --resume) ← Runner (poll loop)
-                                                    ↓
-                                              Triage Agent (haiku)
-                                             ↙    ↙     ↘      ↘
-                                        ignore  react  respond      act
-                                                  ↓       ↓     ↙    |    ↘
-                                               emoji  responder researcher executor screamer
-                                                         ↓         ↓         ↓        ↓
-                                                    discord_send_message (via MCP)  docker run
+Discord → discord-mcp daemon (Docker, HTTP) ↔ Claude Code (-p --resume) ← Runner (poll loop)
+                                                       ↓
+                                                 Triage Agent (haiku)
+                                                ↙    ↙     ↘      ↘
+                                           ignore  react  respond      act
+                                                     ↓       ↓     ↙    |    ↘
+                                                  emoji  responder researcher executor screamer
+                                                            ↓         ↓         ↓        ↓
+                                                       discord_send_message / voice_* (all via MCP)
 ```
 
 ### Agents
@@ -118,7 +118,7 @@ Discord → MCP Server (Docker) ←stdio→ Claude Code (-p --resume) ← Runner
 | responder | sonnet | Crafts personality-driven replies |
 | researcher | sonnet | Web search, file lookups, information gathering |
 | executor | sonnet | Tool-based actions (Bash, file ops) with safety checks |
-| screamer | sonnet | Voice channel screams via go-scream Docker container |
+| screamer | sonnet | Voice channel audio playback via discord-mcp `voice_*` tools |
 | memory-manager | opus | Saves context graph during PreCompact |
 | personality-evolver | haiku | Absorbs one user trait per compaction cycle |
 

@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# run-bot.sh - Claudebot lifecycle orchestrator
-# Runs the MCP server as a persistent Docker daemon (HTTP transport) so the
-# Discord gateway stays open and the bot appears always-online. Uses repeated
+# run-bot.sh - Claudebot lifecycle orchestrator (single-instance shell variant)
+# Runs the discord-mcp server as a persistent Docker daemon (HTTP transport) so
+# the Discord gateway stays open and the bot appears always-online. Uses repeated
 # `claude -p --resume` calls to maintain a persistent session across poll cycles.
+#
+# Note: the primary runner is scripts/run_bot.py (used by claudebot-ctl for
+# multi-instance management). This script is a thinner single-instance variant
+# that reads .env from the plugin root.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
+ENV_FILE="${PLUGIN_DIR}/.env"
 
 # Load .env if present
-if [[ -f "${PLUGIN_DIR}/.env" ]]; then
+if [[ -f "${ENV_FILE}" ]]; then
   set -a
-  source "${PLUGIN_DIR}/.env"
+  source "${ENV_FILE}"
   set +a
 fi
 
@@ -62,12 +67,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- Preflight checks ---
+missing_vars=()
 for var in CLAUDEBOT_DISCORD_TOKEN CLAUDEBOT_DISCORD_GUILD_ID; do
   if [[ -z "${!var:-}" ]]; then
-    log_error "Required env var is not set" "var=${var}"
-    exit 1
+    missing_vars+=("$var")
   fi
 done
+if [[ ${#missing_vars[@]} -gt 0 ]]; then
+  log_error "Required env var(s) not set — bot cannot start" \
+    "missing=${missing_vars[*]}" "hint=set them in ${ENV_FILE}"
+  exit 1
+fi
 
 if ! command -v claude &>/dev/null; then
   log_error "claude CLI is not installed"
@@ -79,25 +89,68 @@ if ! command -v docker &>/dev/null; then
   exit 1
 fi
 
+if ! command -v curl &>/dev/null; then
+  log_error "curl is not installed (needed for MCP daemon health probe)"
+  exit 1
+fi
+
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# --- Pre-pull Docker images ---
-log_info "Pre-pulling go-scream image"
-docker pull --platform linux/arm64 ghcr.io/jamesprial/go-scream:latest || log_warn "Failed to pull go-scream image (voice screams may not work)"
+# --- Ensure CLAUDEBOT_AUTH_TOKEN exists, generating + persisting if missing ---
+if [[ -z "${CLAUDEBOT_AUTH_TOKEN:-}" ]]; then
+  CLAUDEBOT_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  export CLAUDEBOT_AUTH_TOKEN
+  log_info "Generated new CLAUDEBOT_AUTH_TOKEN for MCP daemon"
+  if [[ -f "$ENV_FILE" ]]; then
+    # Strip any existing entry (both `KEY=` and `export KEY=` forms), then
+    # append the new one. Don't mask grep I/O errors with `|| true`: exit 1
+    # means "no matches" (fine), anything else is a real failure.
+    tmp_env="$(mktemp)"
+    if ! grep -Ev '^[[:space:]]*(export[[:space:]]+)?CLAUDEBOT_AUTH_TOKEN[[:space:]]*=' "$ENV_FILE" > "$tmp_env"; then
+      rc=$?
+      if [[ "$rc" -ne 1 ]]; then
+        log_error "Failed to read env file while updating auth token" "rc=${rc}" "path=${ENV_FILE}"
+        rm -f "$tmp_env"
+        exit "$rc"
+      fi
+    fi
+    printf '\nCLAUDEBOT_AUTH_TOKEN=%s\n' "$CLAUDEBOT_AUTH_TOKEN" >> "$tmp_env"
+    mv "$tmp_env" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    log_info "Persisted auth token to env file" "path=${ENV_FILE}"
+  else
+    log_warn "No .env file present; generated auth token will not persist across restarts"
+  fi
+fi
 
-log_info "Pre-pulling MCP Docker image"
-docker pull --platform linux/arm64 ghcr.io/jamesprial/claudebot-mcp:latest 2>&1 | tail -1 >&2
+# --- Pre-pull discord-mcp Docker image ---
+log_info "Pre-pulling discord-mcp Docker image"
+docker pull --platform linux/arm64 ghcr.io/jamesprial/discord-mcp:latest 2>&1 | tail -1 >&2
 
 # --- Start MCP daemon container ---
 log_info "Starting MCP daemon" "port=${MCP_PORT}"
 docker rm -f "$MCP_CONTAINER" >/dev/null 2>&1 || true
+
+# discord-mcp uses lowercase pino log levels; map claudebot's uppercase convention.
+mcp_log_level="$(printf '%s' "${CLAUDEBOT_LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
+case "$mcp_log_level" in
+  fatal|error|warn|info|debug|trace|silent) ;;
+  *) mcp_log_level="info" ;;
+esac
+
 docker run -d --name "$MCP_CONTAINER" \
   --platform linux/arm64 \
   -p "${MCP_PORT}:8080" \
-  -e CLAUDEBOT_DISCORD_TOKEN \
-  -e CLAUDEBOT_DISCORD_GUILD_ID \
-  ghcr.io/jamesprial/claudebot-mcp:latest
+  -e "TRANSPORT=http" \
+  -e "PORT=8080" \
+  -e "HOST=0.0.0.0" \
+  -e "AUTH_TOKEN=${CLAUDEBOT_AUTH_TOKEN}" \
+  -e "DISCORD_TOKEN=${CLAUDEBOT_DISCORD_TOKEN}" \
+  -e "GUILD_ID=${CLAUDEBOT_DISCORD_GUILD_ID}" \
+  -e "WHISPER_MODEL_PATH=/tmp/whisper-placeholder" \
+  -e "LOG_LEVEL=${mcp_log_level}" \
+  ghcr.io/jamesprial/discord-mcp:latest
 
 # Wait for container to be running
 log_info "Waiting for MCP container to start"
@@ -113,23 +166,41 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# Wait for Discord connection
-log_info "Waiting for Discord connection"
+# Wait for HTTP transport. discord-mcp connects to Discord BEFORE starting the
+# HTTP listener, so any HTTP response (200/401/etc.) proves both Discord login
+# succeeded and the MCP server is up.
+log_info "Waiting for MCP HTTP transport to be ready"
+http_ready=false
 for i in $(seq 1 30); do
-  if docker logs "$MCP_CONTAINER" 2>&1 | grep -q "discord: connected as"; then
-    log_info "MCP daemon connected to Discord"
-    break
-  fi
   if ! docker inspect -f '{{.State.Running}}' "$MCP_CONTAINER" 2>/dev/null | grep -q true; then
-    log_error "MCP container exited unexpectedly"
+    log_error "MCP container exited unexpectedly during startup"
     docker logs "$MCP_CONTAINER" 2>&1 | tail -20 >&2
     exit 1
   fi
-  if [[ $i -eq 30 ]]; then
-    log_warn "Timed out waiting for Discord connection, proceeding anyway"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${CLAUDEBOT_AUTH_TOKEN}" \
+    "http://localhost:${MCP_PORT}/mcp" || echo "000")"
+  if [[ -n "$code" && "$code" != "000" ]]; then
+    log_info "MCP HTTP transport is ready" "probe_status=${code}"
+    if [[ "$code" == "401" ]]; then
+      log_warn "MCP returned 401 — possible token mismatch between env file and running container (e.g. env restored from backup)"
+    fi
+    http_ready=true
+    break
   fi
   sleep 1
 done
+
+if [[ "$http_ready" != true ]]; then
+  log_warn "Timed out waiting for MCP HTTP transport, proceeding anyway"
+fi
+
+# Also check the daemon logs for the "discord ready" / "ready on http" signals.
+if docker logs "$MCP_CONTAINER" 2>&1 | grep -q "discord ready"; then
+  log_info "MCP daemon Discord client is ready"
+elif docker logs "$MCP_CONTAINER" 2>&1 | grep -q "ready on http"; then
+  log_info "MCP daemon HTTP transport reported ready (Discord status unknown)"
+fi
 
 # --- Start MCP daemon log stream ---
 log_info "Starting MCP daemon log stream"
@@ -137,18 +208,23 @@ docker logs -f --timestamps "$MCP_CONTAINER" >> "$MCP_LOG_FILE" 2>&1 &
 MCP_LOG_PID=$!
 log_debug "MCP log streamer started" "pid=${MCP_LOG_PID}"
 
-# --- Generate runtime .mcp.json ---
+# --- Generate runtime .mcp.json (embeds the bearer token) ---
 RUNTIME_MCP_CONFIG="${PLUGIN_DIR}/.mcp.runtime.json"
 cat > "$RUNTIME_MCP_CONFIG" <<EOF
 {
   "mcpServers": {
     "discord": {
       "type": "http",
-      "url": "http://localhost:${MCP_PORT}/mcp"
+      "url": "http://localhost:${MCP_PORT}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CLAUDEBOT_AUTH_TOKEN}"
+      }
     }
   }
 }
 EOF
+# File embeds a bearer token — restrict to owner-only.
+chmod 600 "$RUNTIME_MCP_CONFIG"
 log_info "Generated runtime MCP config" "path=${RUNTIME_MCP_CONFIG}"
 
 # --- Common claude flags ---

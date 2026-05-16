@@ -24,14 +24,13 @@ claudebot-ctl stop main              # Graceful shutdown
 
 **Prerequisites:** Docker installed and running.
 
-Required env vars (set in `instances/<name>.env` or `.env`): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, must be unique per instance), `CLAUDEBOT_DOCKER_PLATFORM` (omit for auto-detect). See `configs/example.env` for all options.
+Required env vars (set in `instances/<name>.env` or `.env`): `CLAUDEBOT_DISCORD_TOKEN` (raw token — do NOT include `Bot ` prefix, the MCP server adds it automatically), `CLAUDEBOT_DISCORD_GUILD_ID`. Optional: `CLAUDEBOT_MCP_PORT` (default 8080, must be unique per instance), `CLAUDEBOT_AUTH_TOKEN` (bearer token for the discord-mcp HTTP daemon; leave blank and the runner auto-generates one on first start and persists it back to the env file), `CLAUDEBOT_DOCKER_PLATFORM` (omit for auto-detect). See `configs/example.env` for all options.
 
-The MCP server (`claudebot-mcp`) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/claudebot-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online. The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles.
+The MCP server (discord-mcp) runs as a **persistent Docker daemon** pulled from `ghcr.io/jamesprial/discord-mcp:latest` with HTTP transport on port 8080. The daemon maintains the Discord gateway connection continuously, keeping the bot always-online and providing both message tools (`discord_*`) and voice-playback tools (`voice_*`). The runner starts the daemon before the poll loop, then uses repeated `claude -p --resume` calls to maintain a persistent session across poll cycles. The container is named `claudebot-mcp-{instance}` for management purposes. Note: `claudebot-mcp` now refers only to the local container name; the image is `ghcr.io/jamesprial/discord-mcp:latest`.
 
 **Operational files** (gitignored, `{instance}` defaults to `default`):
 - `logs/{instance}/bot-YYYYMMDD.log` — Daily log files from the runner
 - `logs/{instance}/mcp-YYYYMMDD.log` — MCP daemon container output (streamed continuously)
-- `logs/{instance}/scream-YYYYMMDD.log` — go-scream invocation output (appended per scream)
 - `.bot-session-{instance}.id` — Persisted session ID for crash recovery across restarts
 - `.mcp.runtime-{instance}.json` — Generated at startup with the daemon's HTTP URL
 - `.claudebot-{instance}.pid` — PID file for status checking
@@ -57,7 +56,7 @@ Messages flow through a pipeline:
    - `responder` (sonnet) — personality-driven replies
    - `researcher` (sonnet) — web search, file lookups
    - `executor` (sonnet) — tool-based actions (Bash, file ops)
-   - `screamer` (sonnet) — voice channel screams via Docker
+   - `screamer` (sonnet) — voice channel audio playback via discord-mcp `voice_*` tools
 4. **PreCompact hook** fires before context compression, dispatching `memory-manager` (opus) then `personality-evolver` (haiku)
 
 All agents send responses **directly to Discord via MCP tools** — they don't return text to be relayed.
@@ -71,7 +70,7 @@ All agents send responses **directly to Discord via MCP tools** — they don't r
 | Agents | `agents/*.md` | triage, responder, researcher, executor, screamer, memory-manager, personality-evolver |
 | Hook | `hooks/hooks.json` | PreCompact prompt-based hook for memory preservation |
 | Command | `commands/bot-setup.md` | `/bot-setup` configuration wizard |
-| MCP config | `.mcp.json` | HTTP connection to claudebot-mcp daemon |
+| MCP config | `.mcp.json` | HTTP connection to discord-mcp daemon |
 | Settings template | `templates/claudebot.local.md` | Per-project config template |
 | Memory templates | `templates/memory/*.md` | Initial blank memory files |
 | Reference docs | `skills/discord-bot/references/` | Memory schema and decision framework |
@@ -86,13 +85,17 @@ Memory files live in `.claude/memory/` in the project being botted (not this plu
 
 **Critical rule:** Memory files are updated ONLY during PreCompact (by memory-manager and personality-evolver agents), never during normal message processing. Agents READ memory for context but do NOT write to it mid-conversation.
 
-## Voice (go-scream)
+## Voice Playback
 
-The bot can play synthetic screams in Discord voice channels via the `screamer` agent. go-scream runs as a Docker container (`ghcr.io/jamesprial/go-scream:latest`) invoked with `docker run --network host`. The bot token (`CLAUDEBOT_DISCORD_TOKEN`) is passed as `DISCORD_TOKEN` to the container. The guild ID comes from `CLAUDEBOT_DISCORD_GUILD_ID`. Voice channel IDs are resolved at runtime via `discord_get_channels`.
+Voice playback runs through the same discord-mcp daemon as the message tools — there is no separate Docker invocation per scream and no fixed preset library. The `screamer` agent picks an arbitrary audio source (a user-supplied URL or a public-domain / permissively-licensed clip) and pushes it through discord-mcp's `voice_*` MCP tools.
 
-Available presets: classic, whisper, death-metal, glitch, banshee, robot.
+Flow:
+1. Triage routes voice-playback requests to the `screamer` agent
+2. Screamer enumerates voice channels via `voice_channel_list`
+3. Screamer calls `voice_join` → `voice_play` (ffmpeg decodes any common format) → `voice_leave`, monitoring with `voice_playback_status` as needed
+4. Screamer sends a status reply via `discord_send_message`
 
-`Scream` must be listed in the channel's tools configuration in `.claude/claudebot.local.md` for the triage agent to route scream requests.
+The `Scream` tool name in `.claude/claudebot.local.md` is the permission gate for voice playback. The name is kept for backward compatibility with existing user configs; it means "may use voice playback" generally, not a literal scream preset. The channel must list `Scream` for triage to route voice requests to the screamer.
 
 ## MCP Tools
 
@@ -112,8 +115,8 @@ Structured key=value logging with level filtering across all components.
 - Per-component overrides take precedence over the global level
 
 **Two logging mechanisms:**
-- **Direct** (Bash-capable agents: executor, screamer): Source `scripts/log-lib.sh`, call `log_info`/`log_error`/`log_debug`/`log_warn`
-- **Relay** (non-Bash agents: triage, responder, researcher, memory-manager, personality-evolver): Include `LOG:` section in agent output; the orchestrating session relays qualifying entries to the log file via Bash
+- **Direct** (Bash-capable agents: executor): Source `scripts/log-lib.sh`, call `log_info`/`log_error`/`log_debug`/`log_warn`
+- **Relay** (non-Bash agents: triage, responder, researcher, screamer, memory-manager, personality-evolver): Include `LOG:` section in agent output; the orchestrating session relays qualifying entries to the log file via Bash
 
 **Libraries:**
 - `scripts/log-lib.sh` — sourceable bash library for agents (~45 lines). Set `LOG_COMPONENT` before sourcing. Writes to stderr and appends to `logs/bot-YYYYMMDD.log` if `CLAUDEBOT_PLUGIN_DIR` is set.
@@ -146,10 +149,10 @@ claudebot-ctl start main             # Start as detached background process
 - Personality evolves gradually — small trait additions per PreCompact cycle, never full rewrites
 - The triage agent runs for EVERY incoming message, even obvious ignores
 - Channel tool permissions from `.claude/claudebot.local.md` MUST be respected by executor
-- Voice screams are played via Docker (go-scream image), not by directly executing a binary
-- The screamer agent uses `--network host` for Docker to support Discord voice UDP
+- Voice playback uses the persistent discord-mcp daemon's `voice_*` tools; any audio source playable by ffmpeg works
+- The screamer agent must only play public-domain / CC0 / permissively-licensed sources — never copyrighted music
 - Responses should be Discord-appropriate (markdown, under 2000 chars)
 - The runner uses repeated `claude -p --resume` calls; each poll is a separate invocation that resumes the same session
 - The MCP daemon container runs persistently to maintain Discord presence; the runner starts it on boot and stops it on exit
 - Env vars (`CLAUDEBOT_DISCORD_TOKEN`, `CLAUDEBOT_DISCORD_GUILD_ID`) are passed to the MCP daemon container via Docker's `-e` flag in `run_bot.py` — they must be exported in the shell environment, not just in `.env`
-- `CLAUDEBOT_PLUGIN_DIR` is exported by `run_bot.py` — agents' Bash commands can use it to locate the plugin directory (e.g., for writing scream logs)
+- `CLAUDEBOT_PLUGIN_DIR` is exported by `run_bot.py` — agents' Bash commands can use it to locate the plugin directory (e.g., for sourcing `scripts/log-lib.sh`)

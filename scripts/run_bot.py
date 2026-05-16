@@ -11,6 +11,7 @@ import atexit
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -51,6 +52,73 @@ def load_dotenv(path: Path) -> None:
             if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
                 val = val[1:-1]
             os.environ[key] = val
+
+
+def ensure_auth_token(env_file: Path | None, log) -> str:
+    """Ensure CLAUDEBOT_AUTH_TOKEN is set. If unset, generate a random token and
+    persist it back to env_file (if provided). Always exports to os.environ."""
+    token = os.environ.get("CLAUDEBOT_AUTH_TOKEN", "").strip()
+    if token:
+        return token
+
+    token = secrets.token_urlsafe(32)
+    os.environ["CLAUDEBOT_AUTH_TOKEN"] = token
+    log.info("Generated new CLAUDEBOT_AUTH_TOKEN for MCP daemon")
+
+    if env_file is None:
+        log.warn(
+            "No env file given; generated auth token will not persist across restarts"
+        )
+        return token
+
+    # Append (or replace) the line in the env file so it persists.
+    try:
+        original = env_file.read_text() if env_file.is_file() else ""
+    except OSError as exc:
+        log.warn("Could not read env file to persist auth token", f"path={env_file}", f"err={exc}")
+        return token
+
+    lines = original.splitlines()
+    replaced = False
+    new_lines: list[str] = []
+    # Match `CLAUDEBOT_AUTH_TOKEN=...` and `export CLAUDEBOT_AUTH_TOKEN=...`
+    # with arbitrary leading/interior whitespace.
+    auth_line_re = re.compile(r"^\s*(?:export\s+)?CLAUDEBOT_AUTH_TOKEN\s*=")
+    for line in lines:
+        if auth_line_re.match(line):
+            new_lines.append(f"CLAUDEBOT_AUTH_TOKEN={token}")
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        if new_lines and new_lines[-1] != "":
+            new_lines.append("")
+        new_lines.append(f"CLAUDEBOT_AUTH_TOKEN={token}")
+
+    new_content = "\n".join(new_lines)
+    if original.endswith("\n") or not original:
+        new_content += "\n"
+
+    # Write atomically: write to a tmp file with 0600, then rename over the
+    # target. Tighten perms on the final path too in case it pre-existed with
+    # looser perms (replace preserves the source file's mode, but be defensive).
+    tmp_path = env_file.with_suffix(env_file.suffix + ".tmp")
+    try:
+        tmp_path.write_text(new_content)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, env_file)  # atomic on POSIX
+        os.chmod(env_file, 0o600)
+        log.info("Persisted auth token to env file", f"path={env_file}")
+    except OSError as exc:
+        log.warn("Could not write env file", f"path={env_file}", f"err={exc}")
+        # Best-effort cleanup of stray tmp file
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +221,22 @@ class BotLifecycle:
 # Preflight
 # ---------------------------------------------------------------------------
 
-def preflight_checks(log) -> None:
-    for var in ("CLAUDEBOT_DISCORD_TOKEN", "CLAUDEBOT_DISCORD_GUILD_ID"):
-        if not os.environ.get(var):
-            log.error("Required env var is not set", f"var={var}")
-            sys.exit(1)
+def preflight_checks(log, env_file: Path | None = None) -> None:
+    missing = [
+        var for var in ("CLAUDEBOT_DISCORD_TOKEN", "CLAUDEBOT_DISCORD_GUILD_ID")
+        if not os.environ.get(var)
+    ]
+    if missing:
+        hint = (
+            f"set them in {env_file}" if env_file is not None
+            else "set them in your shell environment or a .env file in the plugin directory"
+        )
+        log.error(
+            "Required env var(s) not set — bot cannot start",
+            f"missing={','.join(missing)}",
+            f"hint={hint}",
+        )
+        sys.exit(1)
 
     if not shutil.which("claude"):
         log.error("claude CLI is not installed")
@@ -165,6 +244,10 @@ def preflight_checks(log) -> None:
 
     if not shutil.which("docker"):
         log.error("docker is not installed")
+        sys.exit(1)
+
+    if not shutil.which("curl"):
+        log.error("curl is not installed (needed for MCP daemon health probe)")
         sys.exit(1)
 
 
@@ -175,21 +258,13 @@ def preflight_checks(log) -> None:
 def pull_docker_images(log) -> None:
     platform_flags = docker_platform_flags()
 
-    log.info("Pre-pulling go-scream image")
+    log.info("Pre-pulling discord-mcp Docker image")
     result = subprocess.run(
-        ["docker", "pull"] + platform_flags + ["ghcr.io/jamesprial/go-scream:latest"],
+        ["docker", "pull"] + platform_flags + ["ghcr.io/jamesprial/discord-mcp:latest"],
         capture_output=True,
     )
     if result.returncode != 0:
-        log.warn("Failed to pull go-scream image (voice screams may not work)")
-
-    log.info("Pre-pulling MCP Docker image")
-    result = subprocess.run(
-        ["docker", "pull"] + platform_flags + ["ghcr.io/jamesprial/claudebot-mcp:latest"],
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        log.error("Failed to pull MCP Docker image")
+        log.error("Failed to pull discord-mcp Docker image")
         sys.exit(1)
     # Print last line of output to stderr like bash version
     lines = result.stdout.decode().strip().splitlines()
@@ -197,24 +272,34 @@ def pull_docker_images(log) -> None:
         print(lines[-1], file=sys.stderr)
 
 
-def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
+def start_mcp_daemon(mcp_port: int, container_name: str, auth_token: str, log) -> None:
     platform_flags = docker_platform_flags()
-    log.info("Starting MCP daemon", f"port={mcp_port}")
+    log.info("Starting MCP daemon", f"port={mcp_port}", f"container={container_name}")
     subprocess.run(
         ["docker", "rm", "-f", container_name],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    config_file = PLUGIN_DIR / "configs" / "mcp-daemon.yaml"
+
+    # discord-mcp uses lowercase pino log levels; map claudebot's uppercase convention.
+    raw_log_level = os.environ.get("CLAUDEBOT_LOG_LEVEL", "info").strip().lower() or "info"
+    mcp_log_level = raw_log_level if raw_log_level in {
+        "fatal", "error", "warn", "info", "debug", "trace", "silent",
+    } else "info"
+
     subprocess.run(
         [
             "docker", "run", "-d", "--name", container_name,
         ] + platform_flags + [
             "-p", f"{mcp_port}:8080",
-            "-v", f"{config_file}:/etc/claudebot/config.yaml:ro",
-            "-e", "CLAUDEBOT_DISCORD_TOKEN",
-            "-e", "CLAUDEBOT_DISCORD_GUILD_ID",
-            "-e", "CLAUDEBOT_CONFIG_PATH=/etc/claudebot/config.yaml",
-            "ghcr.io/jamesprial/claudebot-mcp:latest",
+            "-e", "TRANSPORT=http",
+            "-e", "PORT=8080",
+            "-e", "HOST=0.0.0.0",
+            "-e", f"AUTH_TOKEN={auth_token}",
+            "-e", f"DISCORD_TOKEN={os.environ['CLAUDEBOT_DISCORD_TOKEN']}",
+            "-e", f"GUILD_ID={os.environ['CLAUDEBOT_DISCORD_GUILD_ID']}",
+            "-e", "WHISPER_MODEL_PATH=/tmp/whisper-placeholder",
+            "-e", f"LOG_LEVEL={mcp_log_level}",
+            "ghcr.io/jamesprial/discord-mcp:latest",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         check=True,
@@ -242,32 +327,65 @@ def start_mcp_daemon(mcp_port: int, container_name: str, log) -> None:
             sys.exit(1)
         time.sleep(1)
 
-    # Wait for Discord connection
-    log.info("Waiting for Discord connection")
+    # Wait for HTTP transport to be listening. discord-mcp connects to Discord
+    # BEFORE starting the HTTP listener, so a successful HTTP response (even 401)
+    # proves both Discord login succeeded and the MCP server is up.
+    log.info("Waiting for MCP HTTP transport to be ready")
+    http_ready = False
     for i in range(1, 31):
-        result = subprocess.run(
-            ["docker", "logs", container_name],
-            capture_output=True, text=True,
-        )
-        combined = result.stdout + result.stderr
-        if "discord connected" in combined:
-            log.info("MCP daemon connected to Discord")
-            break
-
-        # Check container is still running
+        # Container died? bail out fast — Discord creds are almost certainly bad.
         inspect = subprocess.run(
             ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
             capture_output=True, text=True,
         )
         if "true" not in inspect.stdout:
-            log.error("MCP container exited unexpectedly")
-            for line in combined.splitlines()[-20:]:
+            log.error("MCP container exited unexpectedly during startup")
+            logs = subprocess.run(
+                ["docker", "logs", container_name],
+                capture_output=True, text=True,
+            )
+            for line in (logs.stdout + logs.stderr).splitlines()[-20:]:
                 print(line, file=sys.stderr)
             sys.exit(1)
 
-        if i == 30:
-            log.warn("Timed out waiting for Discord connection, proceeding anyway")
+        # Probe localhost:<port>. Auth header attached so a 200 is possible;
+        # 401 also indicates the server is up (would mean token mismatch).
+        probe = subprocess.run(
+            [
+                "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+                "-H", f"Authorization: Bearer {auth_token}",
+                f"http://localhost:{mcp_port}/mcp",
+            ],
+            capture_output=True, text=True,
+        )
+        code = probe.stdout.strip()
+        # Any HTTP response (2xx/4xx) proves the server is listening.
+        # 000 means connection refused / not yet listening.
+        if code and code != "000":
+            log.info("MCP HTTP transport is ready", f"probe_status={code}")
+            if code == "401":
+                log.warn(
+                    "MCP returned 401 — possible token mismatch between env "
+                    "file and running container (e.g. env restored from backup)"
+                )
+            http_ready = True
+            break
+
         time.sleep(1)
+
+    if not http_ready:
+        log.warn("Timed out waiting for MCP HTTP transport, proceeding anyway")
+
+    # Also check the daemon logs for the "ready on http" / "discord ready" signals.
+    logs = subprocess.run(
+        ["docker", "logs", container_name],
+        capture_output=True, text=True,
+    )
+    combined = logs.stdout + logs.stderr
+    if "discord ready" in combined:
+        log.info("MCP daemon Discord client is ready")
+    elif "ready on http" in combined:
+        log.info("MCP daemon HTTP transport reported ready (Discord status unknown)")
 
 
 def start_log_streamer(container_name: str, mcp_log_file: Path, lifecycle: BotLifecycle, log) -> None:
@@ -293,18 +411,27 @@ def is_container_running(container_name: str) -> bool:
 # MCP config
 # ---------------------------------------------------------------------------
 
-def generate_mcp_config(mcp_port: int, config_path: Path, log) -> Path:
+def generate_mcp_config(mcp_port: int, auth_token: str, config_path: Path, log) -> Path:
     config = {
         "mcpServers": {
             "discord": {
                 "type": "http",
                 "url": f"http://localhost:{mcp_port}/mcp",
+                "headers": {
+                    "Authorization": f"Bearer {auth_token}",
+                },
             }
         }
     }
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2)
         f.write("\n")
+    # File embeds a bearer token — restrict to owner-only.
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError as exc:
+        log.warn("Could not tighten perms on runtime MCP config",
+                 f"path={config_path}", f"err={exc}")
     log.info("Generated runtime MCP config", f"path={config_path}")
     return config_path
 
@@ -422,10 +549,18 @@ def main() -> None:
     args = parse_args()
     instance = args.instance
 
-    # Load env files: explicit --env-file first (if given), then .env as fallback
+    # Load env files: explicit --env-file first (if given), then .env as fallback.
+    # Track the "primary" env file: that's where we'll persist any auto-generated
+    # CLAUDEBOT_AUTH_TOKEN. Prefer --env-file, fall back to PLUGIN_DIR/.env.
+    primary_env_file: Path | None = None
     if args.env_file:
-        load_dotenv(Path(args.env_file))
-    load_dotenv(PLUGIN_DIR / ".env")
+        env_path = Path(args.env_file)
+        load_dotenv(env_path)
+        primary_env_file = env_path
+    fallback_env = PLUGIN_DIR / ".env"
+    load_dotenv(fallback_env)
+    if primary_env_file is None and fallback_env.is_file():
+        primary_env_file = fallback_env
 
     # Set up logging env
     os.environ.setdefault("CLAUDEBOT_LOG_LEVEL", "INFO")
@@ -450,8 +585,12 @@ def main() -> None:
     pid_file = PLUGIN_DIR / f".claudebot-{instance}.pid"
 
     # Preflight
-    preflight_checks(log)
+    preflight_checks(log, primary_env_file)
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure we have a CLAUDEBOT_AUTH_TOKEN for the discord-mcp daemon.
+    # If missing, generate and persist back to the instance env file.
+    auth_token = ensure_auth_token(primary_env_file, log)
 
     # Write PID file
     pid_file.write_text(str(os.getpid()) + "\n")
@@ -462,11 +601,11 @@ def main() -> None:
 
     # Docker
     pull_docker_images(log)
-    start_mcp_daemon(mcp_port, container_name, log)
+    start_mcp_daemon(mcp_port, container_name, auth_token, log)
     start_log_streamer(container_name, mcp_log_file, lifecycle, log)
 
-    # MCP config
-    runtime_config = generate_mcp_config(mcp_port, runtime_config_path, log)
+    # MCP config (embeds the bearer token so the claude CLI authenticates)
+    runtime_config = generate_mcp_config(mcp_port, auth_token, runtime_config_path, log)
 
     # Claude flags
     claude_flags = [

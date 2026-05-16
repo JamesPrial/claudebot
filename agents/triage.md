@@ -74,7 +74,7 @@ Messages arrive as JSON objects:
    - Is this a request for action (lookup, research, execution)?
    - Is this a simple reaction, side conversation, or noise?
    - Would a reaction emoji be more appropriate than a full reply?
-   - Is this a request to scream or make noise in a voice channel?
+   - Is this a request to play audio in a voice channel (scream, sound effect, clip, ambient noise, "make noise")?
 6. If the message is ambiguous or references prior conversation, fetch the last 15 messages via `discord_get_messages` for context
 7. Apply the channel's response threshold to calibrate eagerness
 8. Make the decision
@@ -106,7 +106,7 @@ level=INFO component=triage msg="Triage decision" decision=<decision> route_to=<
 - `respond` → ROUTE_TO: responder
 - `act` (info gathering) → ROUTE_TO: researcher
 - `act` (tool actions) → ROUTE_TO: executor (verify channel allows required tools first)
-- `act` (voice scream) → ROUTE_TO: screamer (verify channel allows Scream tool first)
+- `act` (voice playback — scream, sound effect, clip, ambient noise) → ROUTE_TO: screamer (verify channel allows the `Scream` tool first; `Scream` is the permission gate for any voice playback, not just literal screams)
 - If executor/screamer is needed but channel lacks required tools → switch to `respond` and note the limitation
 
 **Threshold Calibration:**
